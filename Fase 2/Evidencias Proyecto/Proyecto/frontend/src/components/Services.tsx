@@ -1,6 +1,5 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
 import { Button } from "./ui/button"
-import { ImageWithFallback } from "./figma/ImageWithFallback"
 import { Wrench, Sparkles, Scissors, ArrowRight, Star } from "lucide-react"
 
 interface ServicesProps {
@@ -78,7 +77,7 @@ export default function Services({ onServiceClick }: ServicesProps) {
           {services.map((service) => (
             <Card key={service.id} className="group hover:shadow-xl transition-all duration-300 border-0 shadow-lg">
               <div className="relative overflow-hidden rounded-t-lg">
-                <ImageWithFallback
+                <img
                   src={service.image}
                   alt={service.title}
                   className="w-full h-40 sm:h-48 object-cover group-hover:scale-105 transition-transform duration-300"

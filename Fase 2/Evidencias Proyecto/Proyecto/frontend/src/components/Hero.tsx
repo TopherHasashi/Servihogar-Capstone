@@ -1,5 +1,4 @@
 import { Button } from "./ui/button"
-import { ImageWithFallback } from "./figma/ImageWithFallback"
 import { CheckCircle, Clock, Shield } from "lucide-react"
 
 interface HeroProps {
@@ -69,7 +68,7 @@ export default function Hero({ onAllServicesClick, onUserClick }: HeroProps) {
           {/* Image */}
           <div className="relative mt-8 lg:mt-0">
             <div className="relative">
-              <ImageWithFallback
+              <img
                 src="https://images.unsplash.com/photo-1704940681667-54510c1fc4e3?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxob21lJTIwc2VydmljZXMlMjBwcm9mZXNzaW9uYWx8ZW58MXx8fHwxNzU3NTQyOTA5fDA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral"
                 alt="Profesional de servicios para el hogar"
                 className="rounded-2xl shadow-2xl w-full h-[300px] sm:h-[400px] lg:h-[500px] object-cover"

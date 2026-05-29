@@ -6,10 +6,10 @@ from django.utils import timezone
 from api.models import Profile
 
 ADMIN_EMAIL = "admin@servihogar.cl"
-ADMIN_PASSWORD = "Admin2025!ServiHogar"
+ADMIN_PASSWORD = "Admin2026!ServiHogar"
 
 VERIF_EMAIL = "verificador@servihogar.cl"
-VERIF_PASSWORD = "Verifier2025!ServiHogar"
+VERIF_PASSWORD = "Verifier2026!ServiHogar"
 
 # Datos por defecto para la tabla dominio.usuario (campos NOT NULL)
 DEFAULT_PHONE = "+56900000000"
