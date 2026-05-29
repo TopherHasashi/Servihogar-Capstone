@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Django
+*.log
+staticfiles/
+media/
+db.sqlite3
+
+# Node / Frontend
+node_modules/
+dist/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+../Mockup Figma/_archive/
+
+# Envs
+.env
+.venv/
+
+# Local Postgres data (Docker volume)
+.postgres-data/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
