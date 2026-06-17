@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import { Button } from "../ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs"
@@ -7,6 +7,7 @@ import SearchTab from "./tabs/SearchTab"
 import RequestsTab from "./tabs/RequestsTab"
 import ProfileTab from "./tabs/ProfileTab"
 import ProfessionalTabMultiService from "./tabs/ProfessionalTabMultiService"
+import NotificationBell from "./NotificationBell"
 import { apiGetAuth, apiPost, apiPostForm } from "../../lib/api"
 import { toast } from "sonner"
 import { 
@@ -53,61 +54,81 @@ export default function UserDashboard({ user, onLogout }: UserDashboardProps) {
   // Reservas recibidas como profesional
   const [professionalBookings, setProfessionalBookings] = useState<any[]>([])
 
-  // Cargar "Mis Solicitudes" reales desde backend
-  useEffect(() => {
-    const load = async () => {
+  // ── Carga de solicitudes (reutilizable) ────────────────────────────────────
+  const loadRequests = useCallback(async () => {
+    try {
+      const clientReqs = await apiGetAuth('/api/my/requests/?as=client')
+      setServiceRequests((clientReqs || []).map((r: any) => ({
+        id: r.id,
+        professional: r.professional,
+        service: r.service,
+        date: r.date,
+        time: r.time,
+        status: r.status,
+        price: r.price,
+        region: r.region || '',
+        comuna: r.comuna || '',
+        rating: typeof r.rating === 'number' ? r.rating : null,
+        review: r.comentario || null,
+      })))
+    } catch {
+      setServiceRequests([])
+    }
+
+    if (user.isProfessional) {
       try {
-        const clientReqs = await apiGetAuth('/api/my/requests/?as=client')
-        // Mapea incluyendo estado de reseña si existe para deshabilitar el botón tras refresco
-        setServiceRequests((clientReqs || []).map((r: any) => ({
+        const profReqs = await apiGetAuth('/api/my/requests/?as=professional')
+        setProfessionalBookings((profReqs || []).map((r: any) => ({
           id: r.id,
-          professional: r.professional,
+          client: r.client,
           service: r.service,
           date: r.date,
           time: r.time,
           status: r.status,
           price: r.price,
+          address: r.address,
+          phone: r.phone,
+          description: r.description || '',
           region: r.region || '',
           comuna: r.comuna || '',
-          rating: typeof r.rating === 'number' ? r.rating : null,
-          review: r.comentario || null,
+          review_comment: r.review_comment || null,
+          review_rating: typeof r.review_rating === 'number' ? r.review_rating : null,
+          review_calidad: r.review_calidad ?? null,
+          review_puntualidad: r.review_puntualidad ?? null,
+          review_comunicacion: r.review_comunicacion ?? null,
         })))
       } catch {
-        setServiceRequests([])
-      }
-
-      if (user.isProfessional) {
-        try {
-          const profReqs = await apiGetAuth('/api/my/requests/?as=professional')
-          setProfessionalBookings((profReqs || []).map((r: any) => ({
-            id: r.id,
-            client: r.client,
-            service: r.service,
-            date: r.date,
-            time: r.time,
-            status: r.status,
-            price: r.price,
-            address: r.address,
-            phone: r.phone,
-            description: r.description || '',
-            region: r.region || '',
-            comuna: r.comuna || '',
-          })))
-        } catch {
-          setProfessionalBookings([])
-        }
-      } else {
         setProfessionalBookings([])
       }
+    } else {
+      setProfessionalBookings([])
     }
-    load()
   }, [user.isProfessional])
+
+  // Carga inicial
+  useEffect(() => {
+    loadRequests()
+  }, [loadRequests])
+
+  // Polling cada 15 s solo cuando el tab activo es "requests"
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  useEffect(() => {
+    if (activeTab === 'requests') {
+      pollRef.current = setInterval(loadRequests, 15000)
+    }
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current)
+        pollRef.current = null
+      }
+    }
+  }, [activeTab, loadRequests])
 
   // Acciones del profesional sobre reservas
   const handleConfirmBooking = async (id: string) => {
     try {
       await apiPost(`/api/requests/${id}/confirm/`, {}, { auth: true })
-      setProfessionalBookings(prev => prev.map(b => b.id === id ? { ...b, status: 'Confirmado' } : b))
+      await loadRequests()
     } catch (e) {
       console.error('No se pudo confirmar la solicitud', e)
       toast.error('No se pudo confirmar la solicitud. Intenta nuevamente.')
@@ -117,7 +138,7 @@ export default function UserDashboard({ user, onLogout }: UserDashboardProps) {
   const handleCancelBooking = async (id: string, reason: string) => {
     try {
       await apiPost(`/api/requests/${id}/cancel/`, { razon: reason }, { auth: true })
-      setProfessionalBookings(prev => prev.map(b => b.id === id ? { ...b, status: 'Cancelado' } : b))
+      await loadRequests()
     } catch (e: any) {
       console.error('No se pudo cancelar la solicitud', e)
       const errorMsg = e?.response?.data?.message || 'No se pudo cancelar la solicitud. Intenta nuevamente.'
@@ -129,7 +150,7 @@ export default function UserDashboard({ user, onLogout }: UserDashboardProps) {
   const handleCancelClientRequest = async (id: string, reason: string) => {
     try {
       await apiPost(`/api/requests/${id}/cancel/`, { razon: reason }, { auth: true })
-      setServiceRequests(prev => prev.map(r => r.id === id ? { ...r, status: 'Cancelado' } : r))
+      await loadRequests()
     } catch (e: any) {
       console.error('No se pudo cancelar la solicitud (cliente)', e)
       const errorMsg = e?.response?.data?.message || 'No se pudo cancelar la solicitud. Intenta nuevamente.'
@@ -237,17 +258,7 @@ export default function UserDashboard({ user, onLogout }: UserDashboardProps) {
   const handleMarkAsCompleted = async (requestId: string) => {
     try {
       await apiPost(`/api/requests/${requestId}/complete/`, {}, { auth: true })
-      
-      // Actualizar el estado local
-      setServiceRequests(prev => 
-        prev.map(req => 
-          req.id === requestId 
-            ? { ...req, status: "Completado" }
-            : req
-        )
-      )
-      
-      // Proceso completado exitosamente - sin mensaje emergente
+      await loadRequests()
     } catch (e: any) {
       console.error('Error al marcar como completado:', e)
       toast.error(e.message || 'No se pudo marcar como completado. Intenta nuevamente.')
@@ -263,18 +274,7 @@ export default function UserDashboard({ user, onLogout }: UserDashboardProps) {
         calificacion_comunicacion: reviewData.calificacion_comunicacion || reviewData.ratings?.calificacion_comunicacion || 0,
       }
       await apiPost(`/api/requests/${reviewData.serviceRequestId}/review/`, payload, { auth: true })
-      setServiceRequests(prev => 
-        prev.map(req => 
-          req.id === reviewData.serviceRequestId 
-            ? { 
-                ...req, 
-                rating: reviewData.averageRating,
-                review: reviewData.comment,
-                detailedRatings: reviewData.ratings
-              }
-            : req
-        )
-      )
+      await loadRequests()
     } catch (e: any) {
       toast.error(e?.message || 'No se pudo enviar la reseña. Intenta nuevamente.')
     }
@@ -357,16 +357,19 @@ export default function UserDashboard({ user, onLogout }: UserDashboardProps) {
                 <p className="text-xs sm:text-sm text-gray-500">Panel de Usuario</p>
               </div>
             </div>
-            <Button 
-              variant="outline" 
-              onClick={onLogout}
-              className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 flex-shrink-0"
-              size="sm"
-            >
-              <LogOut className="w-4 h-4" />
-              <span className="hidden sm:inline">Cerrar Sesión</span>
-              <span className="sm:hidden">Salir</span>
-            </Button>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <NotificationBell />
+              <Button 
+                variant="outline" 
+                onClick={onLogout}
+                className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4"
+                size="sm"
+              >
+                <LogOut className="w-4 h-4" />
+                <span className="hidden sm:inline">Cerrar Sesión</span>
+                <span className="sm:hidden">Salir</span>
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -414,6 +417,7 @@ export default function UserDashboard({ user, onLogout }: UserDashboardProps) {
               onConfirmBooking={handleConfirmBooking}
               onCancelBooking={handleCancelBooking}
               onCancelClient={handleCancelClientRequest}
+              onRefresh={loadRequests}
             />
           </TabsContent>
 

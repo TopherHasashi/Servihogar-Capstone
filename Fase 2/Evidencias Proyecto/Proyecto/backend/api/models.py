@@ -169,3 +169,30 @@ class DiaBloqueado(models.Model):
 	class Meta:
 		managed = False
 		db_table = 'dia_bloqueado'
+
+
+class Notification(models.Model):
+	TIPO_CHOICES = (
+		("verification_approved", "Servicio aprobado"),
+		("verification_rejected", "Servicio rechazado"),
+		("booking_received", "Nueva solicitud recibida"),
+		("booking_confirmed", "Solicitud confirmada"),
+		("booking_cancelled", "Solicitud cancelada"),
+		("booking_completed", "Servicio completado"),
+		("review_received", "Nueva reseña recibida"),
+	)
+
+	user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
+	tipo = models.CharField(max_length=40, choices=TIPO_CHOICES)
+	titulo = models.CharField(max_length=200)
+	mensaje = models.TextField()
+	leida = models.BooleanField(default=False)
+	# JSON libre: service_name, reason, request_id, etc.
+	extra = models.JSONField(default=dict, blank=True)
+	creado_en = models.DateTimeField(auto_now_add=True)
+
+	class Meta:
+		ordering = ["-creado_en"]
+
+	def __str__(self) -> str:
+		return f"Notif[{self.tipo}] → {self.user.username}"

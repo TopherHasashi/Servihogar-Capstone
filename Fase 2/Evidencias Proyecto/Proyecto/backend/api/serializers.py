@@ -1,6 +1,48 @@
 from django.contrib.auth.models import User
+from django.contrib.auth import authenticate
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 from .models import Profile, UsuarioDominio
+
+
+class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """Allows login with email regardless of the Django username value."""
+
+    def validate(self, attrs):
+        # attrs['username'] contains whatever the client sent as 'username'
+        raw = attrs.get(self.username_field, '')
+        password = attrs.get('password', '')
+
+        # First try standard authenticate (works when username == email)
+        user = authenticate(
+            request=self.context.get('request'),
+            username=raw,
+            password=password,
+        )
+
+        # If that failed, try to look up the user by email and authenticate by username
+        if user is None:
+            try:
+                django_user = User.objects.get(email__iexact=raw)
+                user = authenticate(
+                    request=self.context.get('request'),
+                    username=django_user.username,
+                    password=password,
+                )
+            except User.DoesNotExist:
+                pass
+
+        if user is None or not user.is_active:
+            raise serializers.ValidationError(
+                'Credenciales inv\u00e1lidas: correo o contrase\u00f1a incorrectos.'
+            )
+
+        refresh = RefreshToken.for_user(user)
+        return {
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+        }
 
 
 class ProfileSerializer(serializers.ModelSerializer):

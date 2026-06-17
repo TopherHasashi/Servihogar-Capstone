@@ -33,6 +33,10 @@ from .views import (
     update_service_details,
     password_reset,
     password_reset_confirm,
+    notifications_list,
+    notification_mark_read,
+    notifications_mark_all_read,
+    service_reviews,
 )
 from .admin_views import (
     admin_dashboard_summary,
@@ -47,13 +51,19 @@ from .operations_views import (
     get_operations_stats,
     resolve_request_issue,
 )
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.views import TokenRefreshView
+from .serializers import EmailTokenObtainPairSerializer
+from rest_framework_simplejwt.views import TokenObtainPairView
+
+
+class EmailLoginView(TokenObtainPairView):
+    serializer_class = EmailTokenObtainPairSerializer
 
 urlpatterns = [
     path("ping/", ping, name="ping"),
     # Auth
     path("auth/register/", register, name="register"),
-    path("auth/login/", TokenObtainPairView.as_view(), name="login"),
+    path("auth/login/", EmailLoginView.as_view(), name="login"),
     path("auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("auth/me/", me, name="me"),
     path("auth/me/update/", update_me, name="update_me"),
@@ -100,4 +110,10 @@ urlpatterns = [
     path("admin/operations/problematic-requests/", get_problematic_requests, name="get_problematic_requests"),
     path("admin/operations/stats/", get_operations_stats, name="get_operations_stats"),
     path("admin/operations/resolve/<uuid:request_id>/", resolve_request_issue, name="resolve_request_issue"),
+    # Notifications
+    path("notifications/", notifications_list, name="notifications_list"),
+    path("notifications/<int:notification_id>/read/", notification_mark_read, name="notification_mark_read"),
+    path("notifications/read-all/", notifications_mark_all_read, name="notifications_mark_all_read"),
+    # Service reviews (public)
+    path("services/<uuid:service_id>/reviews/", service_reviews, name="service_reviews"),
 ]

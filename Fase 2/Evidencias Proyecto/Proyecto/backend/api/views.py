@@ -1598,6 +1598,43 @@ def verify_service(request, servicio_id: str):
 				[rut_ver, now, reason or None, servicio_id],
 			)
 
+	# ── Notificación al profesional ──────────────────────────────────────────
+	try:
+		with connection.cursor() as cur:
+			cur.execute(
+				"""
+				SELECT sp.rut_usuario, cs.nombre
+				FROM servicio_profesional sp
+				LEFT JOIN categoria_servicio cs ON cs.id_categoria_servicio = sp.id_categoria_servicio
+				WHERE sp.id_servicio_profesional = %s
+				""",
+				[servicio_id],
+			)
+			notif_row = cur.fetchone()
+		if notif_row:
+			rut_prof_notif, cat_nombre = notif_row
+			prof_user = _get_user_by_rut(rut_prof_notif)
+			if prof_user:
+				servicio_label = cat_nombre or 'tu servicio'
+				if action == 'approve':
+					_create_notification(
+						prof_user,
+						tipo='verification_approved',
+						titulo='¡Servicio aprobado!',
+						mensaje=f'Tu servicio de {servicio_label} ha sido aprobado y ya está visible para los clientes.',
+						extra={'service_id': str(servicio_id), 'service_name': servicio_label},
+					)
+				else:
+					_create_notification(
+						prof_user,
+						tipo='verification_rejected',
+						titulo='Servicio rechazado',
+						mensaje=f'Tu servicio de {servicio_label} fue rechazado por el verificador.' + (f' Razón: {reason}' if reason else ''),
+						extra={'service_id': str(servicio_id), 'service_name': servicio_label, 'reason': reason},
+					)
+	except Exception as e:
+		logger.warning(f"Error enviando notificación verify_service: {e}")
+
 	return Response({"ok": True})
 
 
@@ -3075,18 +3112,24 @@ def service_availability(request, service_id: str):
 			cur = start_dt
 			# Generar slots avanzando en step_minutes, cada uno con duración slot_minutes
 			while (cur + timedelta(minutes=slot_minutes)) <= end_dt:
-				# Exclude past
+				# Exclude past slots entirely
 				if date_obj > today or (date_obj == today and cur.time() >= tz_now.time()):
-					# Excluir solapadas con reservas existentes
 					bks = booked_by_date.get(date_obj.isoformat(), [])
 					cand_start = cur
 					cand_end = cur + timedelta(minutes=slot_minutes)
-					conflict = any((cand_start < b_end and cand_end > b_start) for b_start, b_end in bks)
-					if not conflict:
-						slots.append({
-							'start': cand_start.strftime('%H:%M'),
-							'end':   cand_end.strftime('%H:%M'),
-						})
+					# Keep naive comparison safe (bks datetimes are naive, tzinfo=None)
+					try:
+						conflict = any(
+							(cand_start < b_end and cand_end > b_start)
+							for b_start, b_end in bks
+						)
+					except TypeError:
+						conflict = False
+					slots.append({
+						'start': cand_start.strftime('%H:%M'),
+						'end':   cand_end.strftime('%H:%M'),
+						'available': not conflict,
+					})
 				cur = cur + timedelta(minutes=step_minutes)
 		return slots
 
@@ -3341,6 +3384,20 @@ def service_book(request, service_id: str):
 		)
 		new_id = cur.fetchone()[0]
 
+	# Notificar al profesional sobre la nueva solicitud
+	try:
+		prof_user = _get_user_by_rut(rut_prof)
+		if prof_user:
+			_create_notification(
+				prof_user,
+				tipo='booking_received',
+				titulo='Nueva solicitud recibida',
+				mensaje=f'Tienes una nueva solicitud de servicio para el {start_dt.strftime("%d/%m/%Y")} a las {start_dt.strftime("%H:%M")}.',
+				extra={'request_id': str(new_id), 'fecha': start_dt.isoformat()},
+			)
+	except Exception as e:
+		logger.warning(f"Error enviando notificación service_book: {e}")
+
 	return Response({
 		"ok": True,
 		"id_solicitud_servicio": str(new_id),
@@ -3394,6 +3451,20 @@ def booking_confirm(request, request_id: str):
 			""",
 			[timezone.now(), timezone.now(), request_id],
 		)
+
+	# Notificar al cliente que su solicitud fue confirmada
+	try:
+		client_user = _get_user_by_rut(rut_cli)
+		if client_user:
+			_create_notification(
+				client_user,
+				tipo='booking_confirmed',
+				titulo='Solicitud confirmada',
+				mensaje='El profesional ha confirmado tu solicitud de servicio. ¡Ya está agendado!',
+				extra={'request_id': str(request_id)},
+			)
+	except Exception as e:
+		logger.warning(f"Error enviando notificación booking_confirm: {e}")
 
 	return Response({"ok": True, "id_solicitud_servicio": request_id, "estado": "confirmado"})
 
@@ -3489,6 +3560,26 @@ def booking_cancel(request, request_id: str):
 			)
 			logger.info(f"âœ… Pago marcado como 'en_revision'. Admin debe decidir porcentaje de reembolso.")
 
+	# Notificar a la otra parte de la cancelación
+	try:
+		is_client_cancelling = str(dom.rut) == str(rut_cli)
+		rut_to_notify = rut_prof if is_client_cancelling else rut_cli
+		notify_user = _get_user_by_rut(rut_to_notify)
+		if notify_user:
+			if is_client_cancelling:
+				msg = f'El cliente canceló la solicitud de servicio. Razón: {reason}'
+			else:
+				msg = f'El profesional canceló tu solicitud de servicio. Razón: {reason}'
+			_create_notification(
+				notify_user,
+				tipo='booking_cancelled',
+				titulo='Solicitud cancelada',
+				mensaje=msg,
+				extra={'request_id': str(request_id), 'reason': reason},
+			)
+	except Exception as e:
+		logger.warning(f"Error enviando notificación booking_cancel: {e}")
+
 	return Response({
 		"ok": True, 
 		"id_solicitud_servicio": request_id, 
@@ -3562,6 +3653,21 @@ def booking_complete(request, request_id: str):
 		)
 		
 	logger.info(f"âœ… Servicio completado exitosamente: {request_id}")
+
+	# Notificar al profesional que el servicio fue marcado como completado
+	try:
+		prof_user = _get_user_by_rut(rut_prof)
+		if prof_user:
+			_create_notification(
+				prof_user,
+				tipo='booking_completed',
+				titulo='Servicio completado',
+				mensaje='El cliente ha confirmado que el servicio fue realizado exitosamente.',
+				extra={'request_id': str(request_id)},
+			)
+	except Exception as e:
+		logger.warning(f"Error enviando notificación booking_complete: {e}")
+
 	return Response({
 		"ok": True,
 		"message": "Servicio marcado como completado exitosamente",
@@ -3673,6 +3779,21 @@ def create_review(request, request_id: str):
 		)
 		new_id = cur.fetchone()[0]
 
+	# Notificar al profesional sobre la nueva reseña
+	try:
+		prof_user = _get_user_by_rut(rut_prof)
+		if prof_user:
+			avg_rating = round((cal_calidad + cal_puntualidad + cal_comunicacion) / 3, 1)
+			_create_notification(
+				prof_user,
+				tipo='review_received',
+				titulo='Nueva reseña recibida',
+				mensaje=f'Un cliente dejó una reseña con calificación promedio {avg_rating}/5.{"" if not comentario else f" Comentario: {comentario[:80]}"}',
+				extra={'request_id': str(request_id), 'rating': avg_rating},
+			)
+	except Exception as e:
+		logger.warning(f"Error enviando notificación create_review: {e}")
+
 	return Response({
 		"ok": True,
 		"id_resena": str(new_id),
@@ -3725,7 +3846,15 @@ def my_requests(request):
 					   uc.telefono AS cliente_telefono,
 				   cat.nombre AS categoria,
 				   c.nombre AS comuna_nombre,
-				   r.nombre AS region_nombre
+				   r.nombre AS region_nombre,
+				   re.comentario AS resena_comentario,
+				   CASE
+				     WHEN re.id_resena IS NULL THEN NULL
+				     ELSE ROUND((COALESCE(re.calificacion_calidad,0) + COALESCE(re.calificacion_puntualidad,0) + COALESCE(re.calificacion_comunicacion,0)) / 3.0, 1)
+				   END AS resena_promedio,
+				   re.calificacion_calidad,
+				   re.calificacion_puntualidad,
+				   re.calificacion_comunicacion
 				FROM solicitud_servicio s
 				JOIN usuario up ON up.rut = s.rut_profesional
 				JOIN usuario uc ON uc.rut = s.rut_cliente
@@ -3733,6 +3862,7 @@ def my_requests(request):
 				LEFT JOIN categoria_servicio cat ON cat.id_categoria_servicio = sp.id_categoria_servicio
 				LEFT JOIN comuna c ON c.id_comuna = uc.id_comuna
 				LEFT JOIN region r ON r.id_region = c.id_region
+				LEFT JOIN resena re ON re.id_solicitud_servicio = s.id_solicitud_servicio
 				WHERE s.rut_profesional = %s
 				ORDER BY 
 					CASE
@@ -3746,11 +3876,15 @@ def my_requests(request):
 				[dom.rut],
 			)
 			rows = cur.fetchall()
-			for rid, fp, precio, estado, addr, descp, cli_nom, cli_tel, cat_nom, comuna_nom, region_nom in rows:
+			for rid, fp, precio, estado, addr, descp, cli_nom, cli_tel, cat_nom, comuna_nom, region_nom, res_com, res_avg, cal_cal, cal_pun, cal_com in rows:
 				try:
 					dt = fp if isinstance(fp, datetime) else datetime.fromisoformat(str(fp))
 				except Exception:
 					dt = datetime.now()
+				try:
+					avg = float(res_avg) if res_avg is not None else None
+				except Exception:
+					avg = None
 				results.append({
 					'id': str(rid),
 					'service': cat_nom or 'Servicio',
@@ -3764,6 +3898,11 @@ def my_requests(request):
 					'description': (descp or '').strip(),
 					'comuna': comuna_nom or '',
 					'region': region_nom or '',
+					'review_comment': res_com or None,
+					'review_rating': avg,
+					'review_calidad': int(cal_cal) if cal_cal is not None else None,
+					'review_puntualidad': int(cal_pun) if cal_pun is not None else None,
+					'review_comunicacion': int(cal_com) if cal_com is not None else None,
 				})
 		else:
 			# Solicitudes donde el usuario es el cliente
@@ -4245,3 +4384,169 @@ def password_reset_confirm(request):
         return Response({'message': 'Contraseña actualizada correctamente'})
     else:
         return Response({'message': 'El enlace de recuperación es inválido o ha expirado'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NOTIFICATION HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+from .models import Notification
+
+
+def _create_notification(user: User, tipo: str, titulo: str, mensaje: str, extra: dict = None):
+    """Crea una notificación para un usuario Django. Ignora silenciosamente si falla."""
+    try:
+        Notification.objects.create(
+            user=user,
+            tipo=tipo,
+            titulo=titulo,
+            mensaje=mensaje,
+            extra=extra or {},
+        )
+    except Exception as e:
+        logger.warning(f"No se pudo crear notificación para {user.username}: {e}")
+
+
+def _get_user_by_rut(rut: str) -> Optional[User]:
+    """Busca el User Django correspondiente a un RUT del dominio."""
+    try:
+        dom = UsuarioDominio.objects.get(rut=rut)
+        return User.objects.get(email=dom.email)
+    except (UsuarioDominio.DoesNotExist, User.DoesNotExist):
+        return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NOTIFICATION VIEWS
+# ──────────────────────────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def notifications_list(request):
+    """Devuelve las notificaciones del usuario autenticado.
+    Query params:
+      - unread_only=true  → solo no leídas
+      - limit=N           → máximo N resultados (default 50)
+    """
+    unread_only = request.query_params.get('unread_only', '').lower() == 'true'
+    try:
+        limit = max(1, min(int(request.query_params.get('limit', 50)), 200))
+    except (ValueError, TypeError):
+        limit = 50
+
+    qs = Notification.objects.filter(user=request.user)
+    if unread_only:
+        qs = qs.filter(leida=False)
+    qs = qs[:limit]
+
+    data = [
+        {
+            'id': n.id,
+            'tipo': n.tipo,
+            'titulo': n.titulo,
+            'mensaje': n.mensaje,
+            'leida': n.leida,
+            'extra': n.extra,
+            'creado_en': n.creado_en.isoformat(),
+        }
+        for n in qs
+    ]
+    unread_count = Notification.objects.filter(user=request.user, leida=False).count()
+    return Response({'notifications': data, 'unread_count': unread_count})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def notification_mark_read(request, notification_id: int):
+    """Marca una notificación específica como leída."""
+    updated = Notification.objects.filter(id=notification_id, user=request.user).update(leida=True)
+    if updated == 0:
+        return Response({'message': 'Notificación no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({'ok': True})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def notifications_mark_all_read(request):
+    """Marca todas las notificaciones del usuario como leídas."""
+    Notification.objects.filter(user=request.user, leida=False).update(leida=True)
+    return Response({'ok': True})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SERVICE REVIEWS ENDPOINT
+# ──────────────────────────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+def service_reviews(request, service_id: str):
+    """Reseñas públicas de un servicio específico.
+    Respuesta:
+      {
+        average_rating: float | null,
+        total_reviews: int,
+        breakdown: { calidad: float, puntualidad: float, comunicacion: float },
+        reviews: [{ rating, comment, date }]
+      }
+    """
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                re.comentario,
+                ROUND((COALESCE(re.calificacion_calidad,0) + COALESCE(re.calificacion_puntualidad,0) + COALESCE(re.calificacion_comunicacion,0)) / 3.0, 1) AS promedio,
+                re.calificacion_calidad,
+                re.calificacion_puntualidad,
+                re.calificacion_comunicacion,
+                re.creado_en
+            FROM resena re
+            JOIN solicitud_servicio ss ON ss.id_solicitud_servicio = re.id_solicitud_servicio
+            WHERE ss.id_servicio_profesional = %s
+            ORDER BY re.creado_en DESC
+            """,
+            [str(service_id)],
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return Response({
+            'average_rating': None,
+            'total_reviews': 0,
+            'breakdown': {'calidad': 0, 'puntualidad': 0, 'comunicacion': 0},
+            'reviews': [],
+        })
+
+    total = len(rows)
+    sum_avg = sum_cal = sum_pun = sum_com = 0.0
+    reviews = []
+    for comentario, promedio, cal, pun, com, creado_en in rows:
+        try:
+            avg_val = float(promedio) if promedio is not None else 0.0
+        except Exception:
+            avg_val = 0.0
+        sum_avg += avg_val
+        sum_cal += int(cal or 0)
+        sum_pun += int(pun or 0)
+        sum_com += int(com or 0)
+        try:
+            date_str = creado_en.strftime('%Y-%m-%d') if hasattr(creado_en, 'strftime') else str(creado_en)[:10]
+        except Exception:
+            date_str = ''
+        reviews.append({
+            'rating': round(avg_val, 1),
+            'calidad': int(cal or 0),
+            'puntualidad': int(pun or 0),
+            'comunicacion': int(com or 0),
+            'comment': comentario or '',
+            'date': date_str,
+        })
+
+    return Response({
+        'average_rating': round(sum_avg / total, 1),
+        'total_reviews': total,
+        'breakdown': {
+            'calidad': round(sum_cal / total, 1),
+            'puntualidad': round(sum_pun / total, 1),
+            'comunicacion': round(sum_com / total, 1),
+        },
+        'reviews': reviews,
+    })

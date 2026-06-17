@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../ui/card"
 import { Button } from "../../ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../ui/tabs"
@@ -25,7 +25,8 @@ import {
   MapPin,
   Phone,
   AlertCircle,
-  AlertTriangle
+  AlertTriangle,
+  RefreshCw,
 } from "lucide-react"
 
 interface RequestsTabProps {
@@ -36,6 +37,7 @@ interface RequestsTabProps {
   onConfirmBooking?: (id: string) => void
   onCancelBooking?: (id: string, reason: string) => void
   onCancelClient?: (id: string, reason: string) => void
+  onRefresh?: () => Promise<void>
 }
 
 export default function RequestsTab({ 
@@ -46,10 +48,37 @@ export default function RequestsTab({
   onConfirmBooking,
   onCancelBooking,
   onCancelClient,
+  onRefresh,
 }: RequestsTabProps) {
   const [requestsTab, setRequestsTab] = useState("client")
   const [showReviewModal, setShowReviewModal] = useState(false)
   const [selectedServiceForReview, setSelectedServiceForReview] = useState<any>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState<Date>(new Date())
+  const lastUpdatedRef = useRef<Date>(new Date())
+
+  // Actualizar marca de tiempo cuando cambien los datos
+  useEffect(() => {
+    lastUpdatedRef.current = new Date()
+    setLastUpdated(new Date())
+  }, [serviceRequests, professionalBookings])
+
+  const handleManualRefresh = async () => {
+    if (!onRefresh || refreshing) return
+    setRefreshing(true)
+    try {
+      await onRefresh()
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  function formatLastUpdated(d: Date): string {
+    const diff = Math.floor((Date.now() - d.getTime()) / 1000)
+    if (diff < 5) return 'Ahora mismo'
+    if (diff < 60) return `Hace ${diff}s`
+    return `Hace ${Math.floor(diff / 60)}min`
+  }
   
   // Estados para controlar el diálogo de cancelación
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false)
@@ -125,10 +154,23 @@ export default function RequestsTab({
     <>
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Calendar className="w-5 h-5" />
-            Mis Solicitudes
-          </CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2">
+              <Calendar className="w-5 h-5" />
+              Mis Solicitudes
+            </CardTitle>
+            {onRefresh && (
+              <button
+                onClick={handleManualRefresh}
+                disabled={refreshing}
+                title="Actualizar solicitudes"
+                className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-primary transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">{formatLastUpdated(lastUpdated)}</span>
+              </button>
+            )}
+          </div>
           <CardDescription>
             Gestiona tus servicios solicitados y trabajos realizados
           </CardDescription>
@@ -338,6 +380,35 @@ export default function RequestsTab({
                               )}
                             </div>
                           </div>
+
+                          {/* Reseña recibida del cliente */}
+                          {booking.status === "Completado" && booking.review_rating !== null && (
+                            <div className="mt-3 p-3 rounded-lg bg-yellow-50 border border-yellow-100">
+                              <div className="flex items-center gap-2 mb-1">
+                                <Star className="w-4 h-4 fill-yellow-400 text-yellow-400" />
+                                <span className="font-semibold text-sm text-yellow-800">
+                                  {booking.review_rating.toFixed(1)} — Reseña del cliente
+                                </span>
+                              </div>
+                              <div className="flex gap-3 text-xs text-gray-500 mb-2">
+                                {booking.review_calidad !== null && (
+                                  <span>Calidad: <strong>{booking.review_calidad}/5</strong></span>
+                                )}
+                                {booking.review_puntualidad !== null && (
+                                  <span>Puntualidad: <strong>{booking.review_puntualidad}/5</strong></span>
+                                )}
+                                {booking.review_comunicacion !== null && (
+                                  <span>Comunicación: <strong>{booking.review_comunicacion}/5</strong></span>
+                                )}
+                              </div>
+                              {booking.review_comment && (
+                                <p className="text-sm text-gray-700 italic">"{booking.review_comment}"</p>
+                              )}
+                            </div>
+                          )}
+                          {booking.status === "Completado" && booking.review_rating === null && (
+                            <p className="mt-2 text-xs text-gray-400 italic">El cliente aún no ha dejado una reseña.</p>
+                          )}
                         </div>
                       </CardContent>
                     </Card>

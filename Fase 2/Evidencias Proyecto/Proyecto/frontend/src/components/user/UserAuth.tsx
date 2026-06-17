@@ -650,7 +650,7 @@ export default function UserAuth({ onLogin, initialTab }: UserAuthProps) {
                     </div>
                     <div className="text-xs text-slate-600 space-y-1">
                       <div><strong>Email:</strong> admin@servihogar.cl</div>
-                      <div><strong>Contraseña:</strong> Admin2026!ServiHogar</div>
+                      <div><strong>Contraseña:</strong> Admin2025!ServiHogar</div>
                     </div>
                   </div>
                   
@@ -661,7 +661,7 @@ export default function UserAuth({ onLogin, initialTab }: UserAuthProps) {
                     </div>
                     <div className="text-xs text-amber-600 space-y-1">
                       <div><strong>Email:</strong> verificador@servihogar.cl</div>
-                      <div><strong>Contraseña:</strong> Verifier2026!ServiHogar</div>
+                      <div><strong>Contraseña:</strong> Verifier2025!ServiHogar</div>
                     </div>
                   </div>
                 </div>
