@@ -50,6 +50,8 @@ from .operations_views import (
     get_problematic_requests,
     get_operations_stats,
     resolve_request_issue,
+    get_users_list,
+    toggle_user_status,
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 from .serializers import EmailTokenObtainPairSerializer
@@ -110,6 +112,8 @@ urlpatterns = [
     path("admin/operations/problematic-requests/", get_problematic_requests, name="get_problematic_requests"),
     path("admin/operations/stats/", get_operations_stats, name="get_operations_stats"),
     path("admin/operations/resolve/<uuid:request_id>/", resolve_request_issue, name="resolve_request_issue"),
+    path("admin/operations/users/", get_users_list, name="get_users_list"),
+    path("admin/operations/users/<str:rut>/toggle-status/", toggle_user_status, name="toggle_user_status"),
     # Notifications
     path("notifications/", notifications_list, name="notifications_list"),
     path("notifications/<int:notification_id>/read/", notification_mark_read, name="notification_mark_read"),

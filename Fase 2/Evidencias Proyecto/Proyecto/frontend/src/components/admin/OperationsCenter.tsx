@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card"
 import { Badge } from "../ui/badge"
 import { Button } from "../ui/button"
+import { Input } from "../ui/input"
 import { 
   AlertTriangle, 
   CheckCircle, 
@@ -11,7 +12,12 @@ import {
   XCircle,
   Loader2,
   TrendingUp,
-  Activity
+  Activity,
+  Users,
+  UserX,
+  UserCheck,
+  Search,
+  Filter
 } from "lucide-react"
 import { apiGetAuth, apiPutAuth } from "../../lib/api"
 import {
@@ -31,6 +37,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select"
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "../ui/tabs"
 
 interface ProblematicRequest {
   id_solicitud: string
@@ -51,6 +63,21 @@ interface ProblematicRequest {
   nombre_categoria: string
   tipo_problema: string
   severidad: string
+}
+
+interface User {
+  rut: string
+  nombres: string
+  apellidos: string
+  nombre_completo: string
+  email: string
+  telefono: string
+  rol: string
+  activo: boolean
+  fecha_registro: string | null
+  ultima_actividad: string | null
+  solicitudes_como_cliente: number
+  solicitudes_como_profesional: number
 }
 
 interface OperationsStats {
@@ -74,7 +101,9 @@ interface Pagination {
 }
 
 export default function OperationsCenter() {
+  const [activeTab, setActiveTab] = useState('requests')
   const [problematicRequests, setProblematicRequests] = useState<ProblematicRequest[]>([])
+  const [users, setUsers] = useState<User[]>([])
   const [stats, setStats] = useState<OperationsStats | null>(null)
   const [pagination, setPagination] = useState<Pagination>({
     total: 0,
@@ -84,16 +113,39 @@ export default function OperationsCenter() {
     has_next: false,
     has_previous: false
   })
+  const [usersPagination, setUsersPagination] = useState<Pagination>({
+    total: 0,
+    page: 1,
+    page_size: 20,
+    total_pages: 0,
+    has_next: false,
+    has_previous: false
+  })
   const [loading, setLoading] = useState(true)
+  const [usersLoading, setUsersLoading] = useState(false)
   const [selectedRequest, setSelectedRequest] = useState<ProblematicRequest | null>(null)
   const [showDialog, setShowDialog] = useState(false)
   const [resolving, setResolving] = useState(false)
   const [resolutionAction, setResolutionAction] = useState<string>('resolved')
   const [resolutionNotes, setResolutionNotes] = useState('')
+  const [userFilters, setUserFilters] = useState({
+    search: '',
+    role: '',
+    status: ''
+  })
+  const [selectedUser, setSelectedUser] = useState<User | null>(null)
+  const [showUserDialog, setShowUserDialog] = useState(false)
+  const [togglingStatus, setTogglingStatus] = useState(false)
 
   useEffect(() => {
     fetchData()
   }, [pagination.page, pagination.page_size])
+
+  useEffect(() => {
+    if (activeTab === 'users') {
+      fetchUsers()
+    }
+  }, [activeTab, usersPagination.page, usersPagination.page_size, userFilters])
 
   const fetchData = async () => {
     try {
@@ -112,6 +164,59 @@ export default function OperationsCenter() {
       console.error('Error cargando datos del centro de operaciones:', err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const fetchUsers = async () => {
+    try {
+      setUsersLoading(true)
+      const params = new URLSearchParams({
+        page: usersPagination.page.toString(),
+        page_size: usersPagination.page_size.toString(),
+      })
+
+      if (userFilters.search) params.append('search', userFilters.search)
+      if (userFilters.role) params.append('role', userFilters.role)
+      if (userFilters.status) params.append('status', userFilters.status)
+
+      const data = await apiGetAuth(`/api/admin/operations/users/?${params.toString()}`)
+      
+      setUsers(data.users || [])
+      if (data.pagination) {
+        setUsersPagination(data.pagination)
+      }
+    } catch (err: any) {
+      console.error('Error cargando usuarios:', err)
+      toast.error('Error cargando usuarios')
+    } finally {
+      setUsersLoading(false)
+    }
+  }
+
+  const handleToggleUserStatus = async (user: User) => {
+    const action = user.activo ? 'deshabilitar' : 'habilitar'
+    const confirmMessage = user.activo 
+      ? `¿Estás seguro de deshabilitar la cuenta de ${user.nombre_completo}? El usuario no podrá acceder al sistema.`
+      : `¿Confirmas habilitar la cuenta de ${user.nombre_completo}?`
+    
+    if (!confirm(confirmMessage)) {
+      return
+    }
+
+    try {
+      setTogglingStatus(true)
+      await apiPutAuth(`/api/admin/operations/users/${user.rut}/toggle-status/`, {
+        activo: !user.activo,
+        razon: `Cuenta ${action}da desde el panel de administración`
+      })
+
+      toast.success(`Cuenta ${action}da exitosamente`)
+      await fetchUsers()
+    } catch (err: any) {
+      console.error(`Error ${action}ndo usuario:`, err)
+      toast.error(`Error ${action}ndo usuario: ` + err.message)
+    } finally {
+      setTogglingStatus(false)
     }
   }
 
@@ -272,8 +377,22 @@ export default function OperationsCenter() {
         </Card>
       </div>
 
-      {/* Tabla de solicitudes problemáticas */}
-      <Card>
+      {/* Pestañas del Centro de Operaciones */}
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
+        <TabsList className="grid w-full max-w-md grid-cols-2">
+          <TabsTrigger value="requests" className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4" />
+            Solicitudes Problemáticas
+          </TabsTrigger>
+          <TabsTrigger value="users" className="flex items-center gap-2">
+            <Users className="w-4 h-4" />
+            Gestión de Usuarios
+          </TabsTrigger>
+        </TabsList>
+
+        {/* Tab de Solicitudes Problemáticas */}
+        <TabsContent value="requests" className="space-y-4">
+          <Card>
         <CardHeader>
           <CardTitle>Solicitudes Problemáticas</CardTitle>
           <CardDescription>
@@ -414,8 +533,240 @@ export default function OperationsCenter() {
           )}
         </CardContent>
       </Card>
+        </TabsContent>
 
-      {/* Dialog de detalles y resolución */}
+        {/* Tab de Gestión de Usuarios */}
+        <TabsContent value="users" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Gestión de Usuarios del Sistema</CardTitle>
+              <CardDescription>
+                Administra cuentas de usuarios - habilita o deshabilita acceso ({usersPagination.total} total)
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {/* Filtros de búsqueda */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <div className="md:col-span-2">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <Input
+                      placeholder="Buscar por nombre, email o RUT..."
+                      value={userFilters.search}
+                      onChange={(e) => setUserFilters({ ...userFilters, search: e.target.value })}
+                      className="pl-10"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <Select 
+                    value={userFilters.role} 
+                    onValueChange={(value) => setUserFilters({ ...userFilters, role: value })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Filtrar por rol" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Todos los roles</SelectItem>
+                      <SelectItem value="cliente">Cliente</SelectItem>
+                      <SelectItem value="profesional">Profesional</SelectItem>
+                      <SelectItem value="verificador">Verificador</SelectItem>
+                      <SelectItem value="administrador">Administrador</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Select 
+                    value={userFilters.status} 
+                    onValueChange={(value) => setUserFilters({ ...userFilters, status: value })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Filtrar por estado" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Todos los estados</SelectItem>
+                      <SelectItem value="activo">Activos</SelectItem>
+                      <SelectItem value="inactivo">Deshabilitados</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {/* Tabla de usuarios */}
+              {usersLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+                  <span className="ml-3 text-gray-600">Cargando usuarios...</span>
+                </div>
+              ) : users.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">
+                  <Users className="w-12 h-12 mx-auto mb-3 text-gray-400" />
+                  <p>No se encontraron usuarios con los filtros aplicados.</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead className="bg-gray-50 border-b">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Usuario</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Rol</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Estado</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actividad</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Solicitudes</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Acciones</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {users.map((user) => (
+                        <tr key={user.rut} className="hover:bg-gray-50">
+                          <td className="px-4 py-3 text-sm">
+                            <div className="font-medium">{user.nombre_completo}</div>
+                            <div className="text-xs text-gray-500 font-mono">{user.rut}</div>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {user.email}
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            <Badge variant="outline" className="capitalize">
+                              {user.rol}
+                            </Badge>
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            {user.activo ? (
+                              <Badge className="bg-green-100 text-green-800 border-green-200">
+                                Activo
+                              </Badge>
+                            ) : (
+                              <Badge className="bg-red-100 text-red-800 border-red-200">
+                                Deshabilitado
+                              </Badge>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-500">
+                            {user.ultima_actividad 
+                              ? new Date(user.ultima_actividad).toLocaleDateString('es-CL')
+                              : 'Nunca'
+                            }
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-500">
+                            <div className="text-xs">
+                              {user.solicitudes_como_cliente > 0 && (
+                                <div>Cliente: {user.solicitudes_como_cliente}</div>
+                              )}
+                              {user.solicitudes_como_profesional > 0 && (
+                                <div>Pro: {user.solicitudes_como_profesional}</div>
+                              )}
+                              {user.solicitudes_como_cliente === 0 && user.solicitudes_como_profesional === 0 && (
+                                <span className="text-gray-400">Sin solicitudes</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            <Button
+                              size="sm"
+                              variant={user.activo ? "destructive" : "default"}
+                              onClick={() => handleToggleUserStatus(user)}
+                              disabled={togglingStatus}
+                            >
+                              {user.activo ? (
+                                <>
+                                  <UserX className="w-4 h-4 mr-1" />
+                                  Deshabilitar
+                                </>
+                              ) : (
+                                <>
+                                  <UserCheck className="w-4 h-4 mr-1" />
+                                  Habilitar
+                                </>
+                              )}
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Controles de paginación para usuarios */}
+              {users.length > 0 && (
+                <div className="flex items-center justify-between px-4 py-3 border-t bg-gray-50 mt-4">
+                  <div className="flex items-center gap-2 text-sm text-gray-600">
+                    <span>
+                      Mostrando {((usersPagination.page - 1) * usersPagination.page_size) + 1} - {Math.min(usersPagination.page * usersPagination.page_size, usersPagination.total)} de {usersPagination.total} usuarios
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {/* Selector de items por página */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600">Items por página:</span>
+                      <Select 
+                        value={usersPagination.page_size.toString()} 
+                        onValueChange={(value) => setUsersPagination(prev => ({ ...prev, page: 1, page_size: parseInt(value) }))}
+                      >
+                        <SelectTrigger className="w-20">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="10">10</SelectItem>
+                          <SelectItem value="20">20</SelectItem>
+                          <SelectItem value="50">50</SelectItem>
+                          <SelectItem value="100">100</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {/* Botones de navegación */}
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setUsersPagination(prev => ({ ...prev, page: 1 }))}
+                        disabled={!usersPagination.has_previous}
+                      >
+                        Primera
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setUsersPagination(prev => ({ ...prev, page: prev.page - 1 }))}
+                        disabled={!usersPagination.has_previous}
+                      >
+                        Anterior
+                      </Button>
+
+                      <span className="px-3 text-sm text-gray-600">
+                        Página {usersPagination.page} de {usersPagination.total_pages}
+                      </span>
+
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setUsersPagination(prev => ({ ...prev, page: prev.page + 1 }))}
+                        disabled={!usersPagination.has_next}
+                      >
+                        Siguiente
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setUsersPagination(prev => ({ ...prev, page: prev.total_pages }))}
+                        disabled={!usersPagination.has_next}
+                      >
+                        Última
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      {/* Dialog de detalles y resolución de solicitudes */}
       <Dialog open={showDialog} onOpenChange={setShowDialog}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
