@@ -435,7 +435,194 @@ def admin_dashboard_summary(request):
 				avg_services_per_professional = round(float(cur.fetchone()[0] or 0), 1)
 			else:
 				avg_services_per_professional = 0
-			
+
+			# 11. CONTEOS TOTALES DE SOLICITUDES POR ESTADO (histórico completo)
+			completed_services_total = 0
+			cancelled_services_total = 0
+			pending_services = 0
+			confirmed_services = 0
+			in_progress_services = 0
+
+			if has_solicitud and has_historial_estado:
+				cur.execute(
+					"""
+					WITH latest_estado AS (
+						SELECT h.id_solicitud_servicio, es.nombre,
+							ROW_NUMBER() OVER (PARTITION BY h.id_solicitud_servicio ORDER BY h.cambiado_en DESC) AS rn
+						FROM historial_estado_solicitud h
+						JOIN estado_solicitud es ON es.id_estado_solicitud = h.id_estado_solicitud
+					)
+					SELECT
+						SUM(CASE WHEN le.nombre = 'completado'   THEN 1 ELSE 0 END) AS completado,
+						SUM(CASE WHEN le.nombre = 'cancelado'    THEN 1 ELSE 0 END) AS cancelado,
+						SUM(CASE WHEN le.nombre = 'pendiente'    THEN 1 ELSE 0 END) AS pendiente,
+						SUM(CASE WHEN le.nombre = 'confirmado'   THEN 1 ELSE 0 END) AS confirmado,
+						SUM(CASE WHEN le.nombre = 'en_progreso'  THEN 1 ELSE 0 END) AS en_progreso
+					FROM solicitud_servicio s
+					JOIN latest_estado le ON le.id_solicitud_servicio = s.id_solicitud_servicio AND le.rn = 1
+					"""
+				)
+			elif has_solicitud:
+				cur.execute(
+					"""
+					SELECT
+						SUM(CASE WHEN estado = 'completado'   THEN 1 ELSE 0 END),
+						SUM(CASE WHEN estado = 'cancelado'    THEN 1 ELSE 0 END),
+						SUM(CASE WHEN estado = 'pendiente'    THEN 1 ELSE 0 END),
+						SUM(CASE WHEN estado = 'confirmado'   THEN 1 ELSE 0 END),
+						SUM(CASE WHEN estado = 'en_progreso'  THEN 1 ELSE 0 END)
+					FROM solicitud_servicio
+					"""
+				)
+			if has_solicitud:
+				row = cur.fetchone()
+				completed_services_total = int(row[0] or 0)
+				cancelled_services_total = int(row[1] or 0)
+				pending_services         = int(row[2] or 0)
+				confirmed_services       = int(row[3] or 0)
+				in_progress_services     = int(row[4] or 0)
+
+			# 12. USUARIOS: total histórico + nuevos este mes
+			total_users_all_time = 0
+			new_users_this_month = 0
+			if has_usuario and has_historial_rol:
+				cur.execute(
+					"""
+					WITH latest_roles AS (
+						SELECT h.rut_usuario, r.nombre,
+							ROW_NUMBER() OVER (PARTITION BY h.rut_usuario ORDER BY h.cambiado_en DESC) AS rn
+						FROM historial_rol_usuario h
+						JOIN rol r ON r.id_rol = h.id_rol
+					)
+					SELECT
+						COUNT(DISTINCT u.rut) AS total,
+						SUM(CASE WHEN u.creado_en >= %s THEN 1 ELSE 0 END) AS nuevos_mes
+					FROM usuario u
+					JOIN latest_roles lr ON lr.rut_usuario = u.rut AND lr.rn = 1
+					WHERE lr.nombre IN ('cliente', 'profesional')
+					""",
+					[first_day_current_month]
+				)
+			elif has_usuario:
+				cur.execute(
+					"""
+					SELECT
+						COUNT(*) AS total,
+						SUM(CASE WHEN creado_en >= %s THEN 1 ELSE 0 END) AS nuevos_mes
+					FROM usuario
+					WHERE rol IN ('cliente', 'profesional')
+					""",
+					[first_day_current_month]
+				)
+			if has_usuario:
+				row = cur.fetchone()
+				total_users_all_time = int(row[0] or 0)
+				new_users_this_month = int(row[1] or 0)
+
+			# 13. SOLICITUDES NUEVAS ESTE MES
+			new_requests_this_month = 0
+			if has_solicitud:
+				cur.execute(
+					"SELECT COUNT(*) FROM solicitud_servicio WHERE creado_en >= %s",
+					[first_day_current_month]
+				)
+				new_requests_this_month = int(cur.fetchone()[0] or 0)
+
+			# 14. VERIFICACIONES PENDIENTES (documentos y servicios)
+			pending_doc_verifications = 0
+			pending_service_verifications = 0
+
+			has_doc = _table_exists(cur, "documento_profesional")
+			has_hev = _table_exists(cur, "historial_estado_verificacion_servicio")
+
+			if has_doc:
+				cur.execute(
+					"SELECT COUNT(*) FROM documento_profesional WHERE estado_verificacion = 'pendiente'"
+				)
+				pending_doc_verifications = int(cur.fetchone()[0] or 0)
+
+			if has_servicio_profesional and has_hev:
+				cur.execute(
+					"""
+					WITH latest_ver AS (
+						SELECT h.id_servicio_profesional, ev.nombre,
+							ROW_NUMBER() OVER (PARTITION BY h.id_servicio_profesional ORDER BY h.cambiado_en DESC) AS rn
+						FROM historial_estado_verificacion_servicio h
+						JOIN estado_verificacion_servicio ev ON ev.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+					)
+					SELECT COUNT(*) FROM latest_ver WHERE rn = 1 AND nombre = 'pendiente'
+					"""
+				)
+				pending_service_verifications = int(cur.fetchone()[0] or 0)
+			elif has_servicio_profesional:
+				cur.execute(
+					"SELECT COUNT(*) FROM servicio_profesional WHERE estado_verificacion = 'pendiente'"
+				)
+				pending_service_verifications = int(cur.fetchone()[0] or 0)
+
+			# 15. DESGLOSE DE CALIFICACIONES POR DIMENSIÓN
+			avg_quality = 0.0
+			avg_punctuality = 0.0
+			avg_communication = 0.0
+			if has_resena:
+				cur.execute(
+					"""
+					SELECT
+						AVG(calificacion_calidad)       AS calidad,
+						AVG(calificacion_puntualidad)   AS puntualidad,
+						AVG(calificacion_comunicacion)  AS comunicacion
+					FROM resena
+					"""
+				)
+				row = cur.fetchone()
+				avg_quality       = round(float(row[0] or 0), 2)
+				avg_punctuality   = round(float(row[1] or 0), 2)
+				avg_communication = round(float(row[2] or 0), 2)
+
+			# 16. SOLICITUDES POR DÍA (últimos 7 días) para mini-tendencia
+			requests_last_7_days = []
+			if has_solicitud:
+				seven_days_ago = now - timedelta(days=7)
+				cur.execute(
+					"""
+					SELECT DATE(creado_en) AS dia, COUNT(*) AS total
+					FROM solicitud_servicio
+					WHERE creado_en >= %s
+					GROUP BY DATE(creado_en)
+					ORDER BY dia ASC
+					""",
+					[seven_days_ago]
+				)
+				for row in cur.fetchall():
+					requests_last_7_days.append({
+						"date": str(row[0]),
+						"count": int(row[1])
+					})
+
+			# 17. TOP 5 PROFESIONALES POR CALIFICACIÓN
+			top_professionals = []
+			if has_resena and has_usuario:
+				cur.execute(
+					"""
+					SELECT
+						u.nombres || ' ' || u.apellidos AS nombre,
+						COUNT(r.id_resena) AS total_resenas,
+						ROUND(AVG((r.calificacion_calidad + r.calificacion_puntualidad + r.calificacion_comunicacion) / 3.0)::numeric, 2) AS avg_rating
+					FROM resena r
+					JOIN usuario u ON u.rut = r.rut_evaluado
+					GROUP BY u.rut, u.nombres, u.apellidos
+					HAVING COUNT(r.id_resena) >= 1
+					ORDER BY avg_rating DESC, total_resenas DESC
+					LIMIT 5
+					"""
+				)
+				for row in cur.fetchall():
+					top_professionals.append({
+						"name": row[0],
+						"reviews": int(row[1]),
+						"rating": float(row[2])
+					})
+
 		# Construir respuesta
 		data = {
 			"kpis": {
@@ -461,9 +648,26 @@ def admin_dashboard_summary(request):
 				"periodStart": first_day_current_month.isoformat(),
 				"periodEnd": now.isoformat(),
 				"totalReviews": total_reviews
-			}
+			},
+			"stats": {
+				"completedServices": completed_services_total,
+				"cancelledServices": cancelled_services_total,
+				"pendingServices": pending_services,
+				"confirmedServices": confirmed_services,
+				"inProgressServices": in_progress_services,
+				"newRequestsThisMonth": new_requests_this_month,
+				"totalUsersAllTime": total_users_all_time,
+				"newUsersThisMonth": new_users_this_month,
+				"pendingDocVerifications": pending_doc_verifications,
+				"pendingServiceVerifications": pending_service_verifications,
+				"avgRatingQuality": avg_quality,
+				"avgRatingPunctuality": avg_punctuality,
+				"avgRatingCommunication": avg_communication,
+			},
+			"requestsTrend": requests_last_7_days,
+			"topProfessionals": top_professionals,
 		}
-		
+
 		return Response(data)
 		
 	except Exception as e:

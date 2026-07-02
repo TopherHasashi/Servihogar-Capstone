@@ -78,16 +78,24 @@ class Command(BaseCommand):
             prof.save(update_fields=["role"])
 
         # 3) Upsert a dominio.usuario para ambos (RUT y datos mínimos)
+        def _parse_rut_seed(rut_str: str):
+            """Convierte '12.345.678-9' en (12345678, '9')."""
+            clean = rut_str.strip().upper().replace('.', '')
+            parts = clean.split('-', 1)
+            return int(parts[0]), parts[1]
+
         def upsert_usuario(rut: str, nombres: str, apellidos: str, email: str):
+            rut_numerico, dv = _parse_rut_seed(rut)
             with connection.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO usuario (
-                        rut, nombres, apellidos, email, telefono,
+                        rut, digito_verificador, nombres, apellidos, email, telefono,
                         fecha_nacimiento, id_comuna, direccion,
                         creado_en, actualizado_en
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (rut) DO UPDATE SET
+                        digito_verificador=EXCLUDED.digito_verificador,
                         nombres=EXCLUDED.nombres,
                         apellidos=EXCLUDED.apellidos,
                         email=EXCLUDED.email,
@@ -98,13 +106,14 @@ class Command(BaseCommand):
                         actualizado_en=EXCLUDED.actualizado_en
                     """,
                     [
-                        rut, nombres, apellidos, email, DEFAULT_PHONE,
+                        rut_numerico, dv, nombres, apellidos, email, DEFAULT_PHONE,
                         DEFAULT_BIRTH, str(comuna_id), DEFAULT_ADDRESS,
                         now, now,
                     ],
                 )
 
         def upsert_historial_genero(rut: str, genero: str):
+            rut_numerico, _ = _parse_rut_seed(rut)
             with connection.cursor() as cur:
                 cur.execute(
                     """
@@ -113,10 +122,11 @@ class Command(BaseCommand):
                     FROM genero g
                     WHERE g.nombre = %s
                     """,
-                    [rut, now, genero],
+                    [rut_numerico, now, genero],
                 )
 
         def upsert_historial_rol(rut: str, rol: str):
+            rut_numerico, _ = _parse_rut_seed(rut)
             with connection.cursor() as cur:
                 cur.execute(
                     """
@@ -125,7 +135,7 @@ class Command(BaseCommand):
                     FROM rol r
                     WHERE r.nombre = %s
                     """,
-                    [rut, now, rol],
+                    [rut_numerico, now, rol],
                 )
 
         with transaction.atomic():

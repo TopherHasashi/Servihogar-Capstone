@@ -232,6 +232,18 @@ def _resolve_region_comuna(cur, region_name: Optional[str], comuna_name: Optiona
 	return region_id, comuna_id
 
 
+def _parse_rut(rut_str: str):
+	"""
+	Convierte un RUT chileno con formato (ej: '12.345.678-9') en (rut_numerico: int, digito_verificador: str).
+	Acepta: '12.345.678-9', '12345678-9', '12345678K'
+	"""
+	clean = (rut_str or '').strip().upper().replace('.', '')
+	if '-' in clean:
+		parts = clean.split('-', 1)
+		return int(parts[0]), parts[1]
+	return int(clean[:-1]), clean[-1]
+
+
 def _get_genero_actual(cur, rut: str) -> Optional[str]:
 	cur.execute(
 		"""
@@ -279,7 +291,7 @@ def _upsert_usuario_dominio(*, first_name: str, last_name: str, rut: Optional[st
 	# Campos requeridos por la tabla dominio
 	nombres = first_name or ""
 	apellidos = last_name or ""
-	rut = (rut or "").strip() or None
+	rut_str = (rut or "").strip() or None
 	# NOT NULL en dominio: usar string vacío si viene vacío
 	telefono = (phone or "").strip()
 	direccion = (address or "").strip()
@@ -289,8 +301,11 @@ def _upsert_usuario_dominio(*, first_name: str, last_name: str, rut: Optional[st
 		direccion = ""
 
 	# Si no hay RUT válido, falla para que el registro no continúe (persistencia principal en `usuario`)
-	if not rut:
+	if not rut_str:
 		return False
+
+	# Parsear RUT: la tabla ahora almacena parte numérica como INTEGER y DV por separado
+	rut_numerico, digito_verificador = _parse_rut(rut_str)
 
 	# Defaults para historial si falta genero/rol
 	if not genero:
@@ -325,7 +340,7 @@ def _upsert_usuario_dominio(*, first_name: str, last_name: str, rut: Optional[st
 
 		try:
 			# Verificar conflictos previos por email asignado a otro RUT
-			existing_by_email = UsuarioDominio.objects.filter(email=email).exclude(rut=rut).first()
+			existing_by_email = UsuarioDominio.objects.filter(email=email).exclude(rut=rut_numerico).first()
 			if existing_by_email:
 				return False
 
@@ -333,11 +348,12 @@ def _upsert_usuario_dominio(*, first_name: str, last_name: str, rut: Optional[st
 				cur.execute(
 					"""
 					INSERT INTO usuario (
-						rut, nombres, apellidos, email, telefono,
+						rut, digito_verificador, nombres, apellidos, email, telefono,
 						fecha_nacimiento, id_comuna, direccion,
 						email_verificado, ultima_actividad, creado_en, actualizado_en
-					) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+					) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 					ON CONFLICT (rut) DO UPDATE SET
+						digito_verificador=EXCLUDED.digito_verificador,
 						nombres=EXCLUDED.nombres,
 						apellidos=EXCLUDED.apellidos,
 						email=EXCLUDED.email,
@@ -348,7 +364,8 @@ def _upsert_usuario_dominio(*, first_name: str, last_name: str, rut: Optional[st
 						actualizado_en=EXCLUDED.actualizado_en
 					""",
 					[
-						rut,
+						rut_numerico,
+						digito_verificador,
 						nombres,
 						apellidos,
 						email,
@@ -370,7 +387,7 @@ def _upsert_usuario_dominio(*, first_name: str, last_name: str, rut: Optional[st
 					FROM genero g
 					WHERE g.nombre = %s
 					""",
-					[rut, timezone.now(), genero],
+					[rut_numerico, timezone.now(), genero],
 				)
 				# Rol actual
 				cur.execute(
@@ -380,7 +397,7 @@ def _upsert_usuario_dominio(*, first_name: str, last_name: str, rut: Optional[st
 					FROM rol r
 					WHERE r.nombre = %s
 					""",
-					[rut, timezone.now(), rol],
+					[rut_numerico, timezone.now(), rol],
 				)
 			return True
 		except IntegrityError:
@@ -1155,13 +1172,21 @@ def apply_professional(request):
 		return Response({"message": "Categoría no encontrada"}, status=status.HTTP_400_BAD_REQUEST)
 	id_cat = row[0]
 
-	# VALIDACIÓN 1: Verificar que no exista ya un servicio con esta categoría para este profesional
+	# VALIDACIÓN 1: Verificar que no exista ya un servicio activo (pendiente o aprobado) con esta categoría
+	# Los servicios rechazados permiten re-intentar en la misma categoría
 	with connection.cursor() as cur:
 		cur.execute(
 			"""
 			SELECT COUNT(*)
-			FROM servicio_profesional
-			WHERE rut_usuario = %s AND id_categoria_servicio = %s
+			FROM servicio_profesional sp
+			WHERE sp.rut_usuario = %s AND sp.id_categoria_servicio = %s
+			AND (
+				SELECT evs.nombre
+				FROM historial_estado_verificacion_servicio h
+				JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+				WHERE h.id_servicio_profesional = sp.id_servicio_profesional
+				ORDER BY h.cambiado_en DESC LIMIT 1
+			) != 'rechazado'
 			""",
 			[dom.rut, id_cat],
 		)
@@ -1179,13 +1204,20 @@ def apply_professional(request):
 			status=status.HTTP_400_BAD_REQUEST
 		)
 
-	# VALIDACIÓN 2: Verificar que no supere el límite de 3 servicios
+	# VALIDACIÓN 2: Verificar que no supere el límite de 3 servicios activos (pendiente/aprobado)
 	with connection.cursor() as cur:
 		cur.execute(
 			"""
 			SELECT COUNT(*)
-			FROM servicio_profesional
-			WHERE rut_usuario = %s
+			FROM servicio_profesional sp
+			WHERE sp.rut_usuario = %s
+			AND (
+				SELECT evs.nombre
+				FROM historial_estado_verificacion_servicio h
+				JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+				WHERE h.id_servicio_profesional = sp.id_servicio_profesional
+				ORDER BY h.cambiado_en DESC LIMIT 1
+			) != 'rechazado'
 			""",
 			[dom.rut],
 		)
@@ -1198,14 +1230,45 @@ def apply_professional(request):
 
 	now = timezone.now()
 	with transaction.atomic():
-		id_serv = uuid.uuid4()
-		# Determinar si es el primer servicio del usuario (para requerir certificado)
+		# Verificar si ya existe un servicio rechazado para esta categoría (reusar en vez de insertar)
 		with connection.cursor() as cur:
-			cur.execute("SELECT COUNT(*) FROM servicio_profesional WHERE rut_usuario=%s", [dom.rut])
+			cur.execute(
+				"""
+				SELECT sp.id_servicio_profesional
+				FROM servicio_profesional sp
+				WHERE sp.rut_usuario = %s AND sp.id_categoria_servicio = %s
+				AND 'rechazado' = (
+					SELECT evs.nombre
+					FROM historial_estado_verificacion_servicio h
+					JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+					WHERE h.id_servicio_profesional = sp.id_servicio_profesional
+					ORDER BY h.cambiado_en DESC LIMIT 1
+				)
+				LIMIT 1
+				""",
+				[dom.rut, str(id_cat)],
+			)
+			existing_row = cur.fetchone()
+		reusing = existing_row is not None
+		id_serv = uuid.UUID(str(existing_row[0])) if reusing else uuid.uuid4()
+
+		# Determinar si es el primer servicio aprobado del usuario (para requerir certificado de antecedentes)
+		with connection.cursor() as cur:
+			cur.execute("""
+				SELECT COUNT(*)
+				FROM servicio_profesional sp
+				WHERE sp.rut_usuario = %s
+				AND 'aprobado' = (
+					SELECT evs.nombre
+					FROM historial_estado_verificacion_servicio h
+					JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+					WHERE h.id_servicio_profesional = sp.id_servicio_profesional
+					ORDER BY h.cambiado_en DESC LIMIT 1
+				)
+			""", [dom.rut])
 			cnt_row = cur.fetchone()
 		es_primer = (cnt_row[0] == 0) if cnt_row else True
 
-		# Insert servicio_profesional en pendiente
 		# Para evitar violar NOT NULL, rellenamos los 3 campos de duración con valores coherentes.
 		if duration_type == 'fixed':
 			dur_fija = fixed_duration
@@ -1219,22 +1282,45 @@ def apply_professional(request):
 		db_duration = 'fija' if duration_type == 'fixed' else 'rango'
 		try:
 			with connection.cursor() as cur:
+				if reusing:
+					# Reusar el servicio rechazado: actualizar datos y limpiar campos de verificación anterior
+					cur.execute(
+						"""
+						UPDATE servicio_profesional SET
+							anos_experiencia = %s, descripcion = %s,
+							tipo_duracion = %s, duracion_fija_minutos = %s,
+							duracion_minima_minutos = %s, duracion_maxima_minutos = %s,
+							precio_fijo = %s, actualizado_en = %s,
+							rut_verificador = NULL, verificado_en = NULL, razon_rechazo = NULL
+						WHERE id_servicio_profesional = %s
+						""",
+						[
+							str(exp_int), description,
+							db_duration, int(dur_fija), int(dur_min), int(dur_max),
+							int(price_fixed), now,
+							str(id_serv),
+						],
+					)
+				else:
+					cur.execute(
+						"""
+						INSERT INTO servicio_profesional (
+							id_servicio_profesional, rut_usuario, id_categoria_servicio,
+							anos_experiencia, descripcion, tipo_duracion, duracion_fija_minutos,
+							duracion_minima_minutos, duracion_maxima_minutos, precio_fijo,
+							creado_en, actualizado_en
+						) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+						""",
+						[
+							str(id_serv), dom.rut, str(id_cat), str(exp_int), description,
+							db_duration, int(dur_fija), int(dur_min), int(dur_max), int(price_fixed),
+							now, now,
+						],
+					)
 				cur.execute(
-					"""
-					INSERT INTO servicio_profesional (
-						id_servicio_profesional, rut_usuario, id_categoria_servicio,
-						anos_experiencia, descripcion, tipo_duracion, duracion_fija_minutos,
-						duracion_minima_minutos, duracion_maxima_minutos, precio_fijo,
-						creado_en, actualizado_en
-					) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-					""",
-					[
-						str(id_serv), dom.rut, str(id_cat), str(exp_int), description,
-						db_duration, int(dur_fija), int(dur_min), int(dur_max), int(price_fixed),
-						now, now,
-					],
+					"INSERT INTO historial_estado_verificacion_servicio (id_servicio_profesional, id_estado_verificacion_servicio, cambiado_en) SELECT %s, id_estado_verificacion_servicio, %s FROM estado_verificacion_servicio WHERE nombre='pendiente'",
+					[str(id_serv), now],
 				)
-				cur.execute("INSERT INTO historial_estado_verificacion_servicio (id_servicio_profesional, id_estado_verificacion_servicio, cambiado_en) SELECT %s, id_estado_verificacion_servicio, %s FROM estado_verificacion_servicio WHERE nombre='pendiente'", [str(id_serv), now])
 		except IntegrityError as ie:
 			transaction.set_rollback(True)
 			return Response({"message": "No se pudo crear el servicio (integridad)", "error": str(ie)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1290,7 +1376,7 @@ def apply_professional(request):
 				else:
 					ext = ''
 			filename = force_basename if force_basename else (base + ext)
-			rel_path = os.path.join('uploads', 'profesionales', dom.rut, subdir, filename)
+			rel_path = os.path.join('uploads', 'profesionales', str(dom.rut), subdir, filename)
 			# Asegurar directorio y guardar
 			path = default_storage.save(rel_path, ContentFile(file_obj.read()))
 			return path, (default_storage.url(path) if hasattr(default_storage, 'url') else (settings.MEDIA_URL + path if getattr(settings, 'MEDIA_URL', None) else path))
@@ -1383,12 +1469,20 @@ def verifications_pending(request):
 			   sp.descripcion, sp.anos_experiencia,
 			   CASE WHEN EXISTS (
 			       SELECT 1 FROM servicio_profesional s2
-			       WHERE s2.rut_usuario = sp.rut_usuario 
-			       AND (s2.creado_en < sp.creado_en OR (s2.creado_en = sp.creado_en AND s2.id_servicio_profesional < sp.id_servicio_profesional))
+			       WHERE s2.rut_usuario = sp.rut_usuario
+			       AND s2.id_servicio_profesional != sp.id_servicio_profesional
+			       AND 'aprobado' = (
+			           SELECT evs2.nombre
+			           FROM historial_estado_verificacion_servicio h2
+			           JOIN estado_verificacion_servicio evs2 ON evs2.id_estado_verificacion_servicio = h2.id_estado_verificacion_servicio
+			           WHERE h2.id_servicio_profesional = s2.id_servicio_profesional
+			           ORDER BY h2.cambiado_en DESC LIMIT 1
+			       )
 			   ) THEN FALSE ELSE TRUE END AS es_primer_servicio,
 			   sp.creado_en,
 				   u.nombres, u.apellidos, u.email, u.telefono,
-				   c.nombre AS comuna_nombre, r.nombre AS region_nombre
+				   c.nombre AS comuna_nombre, r.nombre AS region_nombre,
+				   u.digito_verificador
 			FROM servicio_profesional sp
 			JOIN categoria_servicio cs ON cs.id_categoria_servicio = sp.id_categoria_servicio
 			JOIN usuario u ON u.rut = sp.rut_usuario
@@ -1426,7 +1520,7 @@ def verifications_pending(request):
 				_doc_id = str(d[0])
 				_sid = str(d[1])
 				_tipo = d[2]
-				_rut = d[3]
+				_rut = str(d[3])
 				_subido = d[4]
 				subdir = 'certificados' if (_tipo == 'certificado_antecedentes') else 'experiencia'
 				base_dir = os.path.join('uploads', 'profesionales', _rut, subdir)
@@ -1477,6 +1571,7 @@ def verifications_pending(request):
 			"telefono": r[10],
 			"comuna": r[11],
 			"region": r[12],
+			"digito_verificador": r[13],
 			"documentos": docs_by_service.get(sid, []),
 		})
 	return Response(items)
@@ -1596,6 +1691,17 @@ def verify_service(request, servicio_id: str):
                                 WHERE id_servicio_profesional = %s AND 'pendiente' = (SELECT evs.nombre FROM historial_estado_verificacion_servicio h JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio WHERE h.id_servicio_profesional = servicio_profesional.id_servicio_profesional ORDER BY h.cambiado_en DESC LIMIT 1)
 				""",
 				[rut_ver, now, reason or None, servicio_id],
+			)
+			cur.execute(
+				"""
+				INSERT INTO historial_estado_verificacion_servicio (id_servicio_profesional, id_estado_verificacion_servicio, cambiado_en)
+				SELECT %s, id_estado_verificacion_servicio, %s
+				FROM estado_verificacion_servicio
+				WHERE nombre = 'rechazado'
+				ON CONFLICT (id_servicio_profesional, id_estado_verificacion_servicio)
+				DO UPDATE SET cambiado_en = EXCLUDED.cambiado_en
+				""",
+				[servicio_id, now],
 			)
 
 	# ── Notificación al profesional ──────────────────────────────────────────

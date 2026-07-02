@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs"
 import { Button } from "../ui/button"
 import { Alert, AlertDescription } from "../ui/alert"
+import { Badge } from "../ui/badge"
 import { apiGetAuth, apiPutAuth } from "../../lib/api"
 import { 
   Users, 
@@ -13,7 +14,21 @@ import {
   Star,
   BarChart3,
   LogOut,
-  Loader2
+  Loader2,
+  TrendingUp,
+  TrendingDown,
+  Clock,
+  UserCheck,
+  ShieldAlert,
+  ClipboardList,
+  Activity,
+  UserPlus,
+  Wrench,
+  FileWarning,
+  Award,
+  XCircle,
+  Timer,
+  CalendarDays,
 } from "lucide-react"
 
 interface AdminDashboardBIProps {
@@ -53,9 +68,20 @@ interface DashboardData {
   stats?: {
     completedServices?: number
     cancelledServices?: number
-    avgStars?: number
-    totalUsers?: number
+    pendingServices?: number
+    confirmedServices?: number
+    inProgressServices?: number
+    newRequestsThisMonth?: number
+    totalUsersAllTime?: number
+    newUsersThisMonth?: number
+    pendingDocVerifications?: number
+    pendingServiceVerifications?: number
+    avgRatingQuality?: number
+    avgRatingPunctuality?: number
+    avgRatingCommunication?: number
   }
+  requestsTrend?: Array<{ date: string; count: number }>
+  topProfessionals?: Array<{ name: string; reviews: number; rating: number }>
 }
 
 interface User {
@@ -73,6 +99,10 @@ interface User {
   solicitudes_como_profesional?: number
 }
 
+const getUserDisplayName = (user: User) => {
+  return user.nombre_completo || `${user.nombres || 'Usuario'} ${user.apellidos || ''}`.trim() || 'Usuario'
+}
+
 export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -80,7 +110,7 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
   const [users, setUsers] = useState<User[]>([])
   const [loadingUsers, setLoadingUsers] = useState(false)
   const [usersError, setUsersError] = useState<string | null>(null)
-  const [disablingUser, setDisablingUser] = useState<number | null>(null)
+  const [disablingUser, setDisablingUser] = useState<string | null>(null)
 
   // Cargar datos del dashboard
   useEffect(() => {
@@ -122,12 +152,36 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
   }, [])
 
   // Datos para usar en el componente
-  const basicStats = dashboardData?.stats || {
-    completedServices: 0,
-    cancelledServices: 0,
-    avgStars: dashboardData?.kpis?.avgRating || 0,
-    totalUsers: dashboardData?.kpis?.activeUsers || 0
+  const kpis = dashboardData?.kpis
+  const stats = dashboardData?.stats || {}
+  const profMetrics = dashboardData?.professionalMetrics
+  const serviceDist = dashboardData?.serviceDistribution || []
+  const trend = dashboardData?.requestsTrend || []
+  const topProfs = dashboardData?.topProfessionals || []
+  const meta = dashboardData?.metadata
+
+  // Helper: badge de crecimiento
+  const GrowthBadge = ({ value }: { value: number }) => {
+    if (value === 0) return <span className="text-xs text-gray-400">Sin cambio</span>
+    return value > 0
+      ? <span className="flex items-center gap-1 text-xs text-green-600"><TrendingUp className="w-3 h-3" />+{value}%</span>
+      : <span className="flex items-center gap-1 text-xs text-red-500"><TrendingDown className="w-3 h-3" />{value}%</span>
   }
+
+  // Helper: mini barra de porcentaje
+  const ProgressBar = ({ value, max, color = "bg-blue-500" }: { value: number; max: number; color?: string }) => {
+    const pct = max > 0 ? Math.min(100, Math.round((value / max) * 100)) : 0
+    return (
+      <div className="w-full bg-gray-100 rounded-full h-2 mt-2">
+        <div className={`${color} h-2 rounded-full transition-all`} style={{ width: `${pct}%` }} />
+      </div>
+    )
+  }
+
+  const totalRequests = (stats.completedServices || 0) + (stats.cancelledServices || 0) +
+    (stats.pendingServices || 0) + (stats.confirmedServices || 0) + (stats.inProgressServices || 0)
+
+  const trendMax = trend.length > 0 ? Math.max(...trend.map(t => t.count)) : 1
 
   // Manejar deshabilitar/habilitar usuario
   const handleToggleUserDisable = async (user: User) => {
@@ -209,59 +263,394 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
 
             {/* TAB: RESUMEN DE ESTADÍSTICAS */}
             <TabsContent value="overview" className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+
+              {/* Periodo activo */}
+              {meta && (
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <CalendarDays className="w-4 h-4" />
+                  <span>Métricas del periodo: <strong>{new Date(meta.periodStart).toLocaleDateString('es-CL')}</strong> — <strong>{new Date(meta.periodEnd).toLocaleDateString('es-CL')}</strong></span>
+                  <Badge variant="outline" className="ml-2">{meta.totalReviews} reseñas en el periodo</Badge>
+                </div>
+              )}
+
+              {/* ── SECCIÓN 1: KPIs PRINCIPALES (30 días) ── */}
+              <div>
+                <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">KPIs — últimos 30 días</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-medium text-gray-600">Usuarios Activos</CardTitle>
+                        <Users className="w-4 h-4 text-blue-600" />
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{(kpis?.activeUsers ?? 0).toLocaleString('es-CL')}</div>
+                      <div className="mt-1"><GrowthBadge value={kpis?.userGrowth ?? 0} /></div>
+                      <p className="text-xs text-gray-400 mt-1">vs. 30 días anteriores</p>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-medium text-gray-600">Profesionales Activos</CardTitle>
+                        <UserCheck className="w-4 h-4 text-indigo-600" />
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{(kpis?.activeProfessionals ?? 0).toLocaleString('es-CL')}</div>
+                      <div className="mt-1"><GrowthBadge value={kpis?.professionalGrowth ?? 0} /></div>
+                      <p className="text-xs text-gray-400 mt-1">vs. 30 días anteriores</p>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-medium text-gray-600">Calificación Promedio</CardTitle>
+                        <Star className="w-4 h-4 text-yellow-500" />
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{(kpis?.avgRating ?? 0).toFixed(1)} <span className="text-base">⭐</span></div>
+                      <div className="mt-1">
+                        {(kpis?.ratingChange ?? 0) !== 0
+                          ? <GrowthBadge value={kpis?.ratingChange ?? 0} />
+                          : <span className="text-xs text-gray-400">Sin cambio</span>}
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">Basado en {meta?.totalReviews ?? 0} reseñas</p>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-medium text-gray-600">Tasa de Completación</CardTitle>
+                        <Activity className="w-4 h-4 text-green-600" />
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{kpis?.completionRate ?? 0}%</div>
+                      <ProgressBar value={kpis?.completionRate ?? 0} max={100} color="bg-green-500" />
+                      <p className="text-xs text-gray-400 mt-1">Solicitudes completadas / totales</p>
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
+
+              {/* ── SECCIÓN 2: ESTADO DE SOLICITUDES (histórico) ── */}
+              <div>
+                <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Estado de Solicitudes — Histórico</h2>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+                  <Card className="border-green-200 bg-green-50">
+                    <CardHeader className="pb-1">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle className="w-4 h-4 text-green-600" />
+                        <CardTitle className="text-xs font-medium text-green-700">Completadas</CardTitle>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-green-700">{(stats.completedServices ?? 0).toLocaleString('es-CL')}</div>
+                      <ProgressBar value={stats.completedServices ?? 0} max={totalRequests} color="bg-green-500" />
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border-yellow-200 bg-yellow-50">
+                    <CardHeader className="pb-1">
+                      <div className="flex items-center gap-2">
+                        <ClipboardList className="w-4 h-4 text-yellow-600" />
+                        <CardTitle className="text-xs font-medium text-yellow-700">Pendientes</CardTitle>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-yellow-700">{(stats.pendingServices ?? 0).toLocaleString('es-CL')}</div>
+                      <ProgressBar value={stats.pendingServices ?? 0} max={totalRequests} color="bg-yellow-400" />
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border-blue-200 bg-blue-50">
+                    <CardHeader className="pb-1">
+                      <div className="flex items-center gap-2">
+                        <UserCheck className="w-4 h-4 text-blue-600" />
+                        <CardTitle className="text-xs font-medium text-blue-700">Confirmadas</CardTitle>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-blue-700">{(stats.confirmedServices ?? 0).toLocaleString('es-CL')}</div>
+                      <ProgressBar value={stats.confirmedServices ?? 0} max={totalRequests} color="bg-blue-500" />
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border-purple-200 bg-purple-50">
+                    <CardHeader className="pb-1">
+                      <div className="flex items-center gap-2">
+                        <Wrench className="w-4 h-4 text-purple-600" />
+                        <CardTitle className="text-xs font-medium text-purple-700">En Progreso</CardTitle>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-purple-700">{(stats.inProgressServices ?? 0).toLocaleString('es-CL')}</div>
+                      <ProgressBar value={stats.inProgressServices ?? 0} max={totalRequests} color="bg-purple-500" />
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border-red-200 bg-red-50">
+                    <CardHeader className="pb-1">
+                      <div className="flex items-center gap-2">
+                        <XCircle className="w-4 h-4 text-red-600" />
+                        <CardTitle className="text-xs font-medium text-red-700">Canceladas</CardTitle>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-red-700">{(stats.cancelledServices ?? 0).toLocaleString('es-CL')}</div>
+                      <ProgressBar value={stats.cancelledServices ?? 0} max={totalRequests} color="bg-red-400" />
+                    </CardContent>
+                  </Card>
+                </div>
+                {totalRequests > 0 && (
+                  <p className="text-xs text-gray-400 mt-2 text-right">Total histórico: {totalRequests.toLocaleString('es-CL')} solicitudes</p>
+                )}
+              </div>
+
+              {/* ── SECCIÓN 3: USUARIOS & PROFESIONALES ── */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Usuarios */}
                 <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-medium text-gray-600">Servicios Completados</CardTitle>
-                      <CheckCircle className="w-4 h-4 text-green-600" />
-                    </div>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Users className="w-4 h-4 text-blue-600" /> Usuarios
+                    </CardTitle>
+                    <CardDescription>Registros e incorporaciones</CardDescription>
                   </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{basicStats.completedServices?.toLocaleString() || 0}</div>
-                    <p className="text-sm text-gray-500 mt-1">Conteo total</p>
+                  <CardContent className="space-y-4">
+                    <div className="flex justify-between items-center py-2 border-b">
+                      <span className="text-sm text-gray-600">Total registrados</span>
+                      <span className="font-bold text-lg">{(stats.totalUsersAllTime ?? 0).toLocaleString('es-CL')}</span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b">
+                      <span className="text-sm text-gray-600">Nuevos este mes</span>
+                      <span className="flex items-center gap-2 font-semibold text-green-600">
+                        <UserPlus className="w-4 h-4" />
+                        +{(stats.newUsersThisMonth ?? 0).toLocaleString('es-CL')}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b">
+                      <span className="text-sm text-gray-600">Activos (30 días)</span>
+                      <span className="font-bold">{(kpis?.activeUsers ?? 0).toLocaleString('es-CL')}</span>
+                    </div>
+                    <div className="flex justify-between items-center py-2">
+                      <span className="text-sm text-gray-600">Solicitudes nuevas este mes</span>
+                      <span className="font-bold">{(stats.newRequestsThisMonth ?? 0).toLocaleString('es-CL')}</span>
+                    </div>
                   </CardContent>
                 </Card>
 
+                {/* Profesionales */}
                 <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-medium text-gray-600">Servicios Cancelados</CardTitle>
-                      <AlertCircle className="w-4 h-4 text-red-600" />
-                    </div>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <UserCheck className="w-4 h-4 text-indigo-600" /> Profesionales
+                    </CardTitle>
+                    <CardDescription>Desempeño y verificación</CardDescription>
                   </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{basicStats.cancelledServices?.toLocaleString() || 0}</div>
-                    <p className="text-sm text-gray-500 mt-1">Conteo total</p>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-medium text-gray-600">Promedio Estrellas</CardTitle>
-                      <Star className="w-4 h-4 text-yellow-600" />
+                  <CardContent className="space-y-4">
+                    <div className="flex justify-between items-center py-2 border-b">
+                      <span className="text-sm text-gray-600">Total profesionales</span>
+                      <span className="font-bold text-lg">{(profMetrics?.total ?? 0).toLocaleString('es-CL')}</span>
                     </div>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{basicStats.avgStars?.toFixed(1) || '0.0'} ⭐</div>
-                    <p className="text-sm text-gray-500 mt-1">Calificación</p>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-medium text-gray-600">Usuarios</CardTitle>
-                      <Users className="w-4 h-4 text-blue-600" />
+                    <div className="flex justify-between items-center py-2 border-b">
+                      <span className="text-sm text-gray-600">Top performers (≥4.8★)</span>
+                      <span className="flex items-center gap-2 font-semibold text-yellow-600">
+                        <Award className="w-4 h-4" />
+                        {(profMetrics?.topPerformers ?? 0).toLocaleString('es-CL')}
+                      </span>
                     </div>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{basicStats.totalUsers?.toLocaleString() || 0}</div>
-                    <p className="text-sm text-gray-500 mt-1">Usuarios activos</p>
+                    <div className="flex justify-between items-center py-2 border-b">
+                      <span className="text-sm text-gray-600">Prom. servicios / profesional / mes</span>
+                      <span className="font-bold">{profMetrics?.avgServicesPerMonth ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between items-center py-2">
+                      <span className="text-sm text-gray-600 flex items-center gap-1">
+                        <Timer className="w-3.5 h-3.5" /> Tiempo prom. de respuesta
+                      </span>
+                      <span className="font-bold">{kpis?.avgResponseTime ?? 0}h</span>
+                    </div>
                   </CardContent>
                 </Card>
               </div>
+
+              {/* ── SECCIÓN 4: VERIFICACIONES PENDIENTES + CALIFICACIONES ── */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Verificaciones */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <ShieldAlert className="w-4 h-4 text-orange-500" /> Verificaciones Pendientes
+                    </CardTitle>
+                    <CardDescription>Ítems que requieren revisión</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="flex items-center justify-between p-3 rounded-lg bg-orange-50 border border-orange-200">
+                      <div className="flex items-center gap-3">
+                        <FileWarning className="w-5 h-5 text-orange-500" />
+                        <div>
+                          <p className="text-sm font-medium">Documentos pendientes</p>
+                          <p className="text-xs text-gray-500">Documentos de profesionales sin revisar</p>
+                        </div>
+                      </div>
+                      <Badge variant={stats.pendingDocVerifications ? "destructive" : "secondary"} className="text-base px-3 py-1">
+                        {stats.pendingDocVerifications ?? 0}
+                      </Badge>
+                    </div>
+                    <div className="flex items-center justify-between p-3 rounded-lg bg-yellow-50 border border-yellow-200">
+                      <div className="flex items-center gap-3">
+                        <ClipboardList className="w-5 h-5 text-yellow-600" />
+                        <div>
+                          <p className="text-sm font-medium">Servicios pendientes</p>
+                          <p className="text-xs text-gray-500">Servicios esperando aprobación</p>
+                        </div>
+                      </div>
+                      <Badge variant={stats.pendingServiceVerifications ? "destructive" : "secondary"} className="text-base px-3 py-1">
+                        {stats.pendingServiceVerifications ?? 0}
+                      </Badge>
+                    </div>
+                    <div className="pt-2 text-xs text-gray-400 text-right">
+                      Total pendiente: {((stats.pendingDocVerifications ?? 0) + (stats.pendingServiceVerifications ?? 0))} ítem(s)
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Dimensiones de calificación */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Star className="w-4 h-4 text-yellow-500" /> Calificaciones por Dimensión
+                    </CardTitle>
+                    <CardDescription>Promedio histórico de todas las reseñas</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {[
+                      { label: "Calidad del trabajo", value: stats.avgRatingQuality ?? 0, color: "bg-yellow-400" },
+                      { label: "Puntualidad", value: stats.avgRatingPunctuality ?? 0, color: "bg-blue-400" },
+                      { label: "Comunicación", value: stats.avgRatingCommunication ?? 0, color: "bg-purple-400" },
+                    ].map(({ label, value, color }) => (
+                      <div key={label}>
+                        <div className="flex justify-between text-sm mb-1">
+                          <span className="text-gray-600">{label}</span>
+                          <span className="font-semibold">{value.toFixed(2)} ⭐</span>
+                        </div>
+                        <div className="w-full bg-gray-100 rounded-full h-2">
+                          <div className={`${color} h-2 rounded-full transition-all`} style={{ width: `${(value / 5) * 100}%` }} />
+                        </div>
+                      </div>
+                    ))}
+                    <p className="text-xs text-gray-400 pt-1">Escala 1–5 estrellas</p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* ── SECCIÓN 5: TENDENCIA (últimos 7 días) + TOP PROFESIONALES ── */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Tendencia de solicitudes */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <BarChart3 className="w-4 h-4 text-blue-600" /> Solicitudes — Últimos 7 días
+                    </CardTitle>
+                    <CardDescription>Volumen diario de solicitudes creadas</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {trend.length === 0 ? (
+                      <p className="text-sm text-gray-400 text-center py-4">Sin datos de tendencia</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {trend.map((d) => (
+                          <div key={d.date} className="flex items-center gap-3">
+                            <span className="text-xs text-gray-500 w-20 shrink-0">
+                              {new Date(d.date + 'T12:00:00').toLocaleDateString('es-CL', { weekday: 'short', day: '2-digit', month: '2-digit' })}
+                            </span>
+                            <div className="flex-1 bg-gray-100 rounded-full h-5 relative">
+                              <div
+                                className="bg-blue-500 h-5 rounded-full flex items-center justify-end pr-2 transition-all"
+                                style={{ width: `${Math.max(8, (d.count / trendMax) * 100)}%` }}
+                              >
+                                <span className="text-white text-xs font-semibold">{d.count}</span>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Top profesionales */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Award className="w-4 h-4 text-yellow-500" /> Top 5 Profesionales
+                    </CardTitle>
+                    <CardDescription>Mejor calificados por promedio general</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {topProfs.length === 0 ? (
+                      <p className="text-sm text-gray-400 text-center py-4">Sin datos de profesionales</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {topProfs.map((p, i) => (
+                          <div key={p.name} className="flex items-center gap-3">
+                            <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${i === 0 ? 'bg-yellow-400 text-white' : i === 1 ? 'bg-gray-300 text-gray-700' : i === 2 ? 'bg-amber-600 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                              {i + 1}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium truncate">{p.name}</p>
+                              <p className="text-xs text-gray-400">{p.reviews} reseña{p.reviews !== 1 ? 's' : ''}</p>
+                            </div>
+                            <span className="text-sm font-bold text-yellow-600 shrink-0">{p.rating.toFixed(2)} ⭐</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* ── SECCIÓN 6: DISTRIBUCIÓN POR CATEGORÍA ── */}
+              {serviceDist.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <BarChart3 className="w-4 h-4 text-indigo-600" /> Distribución por Categoría — Últimos 30 días
+                    </CardTitle>
+                    <CardDescription>Solicitudes agrupadas por tipo de servicio</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-3">
+                      {serviceDist.map((s) => {
+                        const distMax = Math.max(...serviceDist.map(x => x.value))
+                        return (
+                          <div key={s.name} className="flex items-center gap-3">
+                            <span className="text-sm text-gray-600 w-36 shrink-0 truncate">{s.name}</span>
+                            <div className="flex-1 bg-gray-100 rounded-full h-5 relative">
+                              <div
+                                className="bg-indigo-500 h-5 rounded-full flex items-center justify-end pr-2 transition-all"
+                                style={{ width: `${Math.max(8, (s.value / distMax) * 100)}%` }}
+                              >
+                                <span className="text-white text-xs font-semibold">{s.value}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <p className="text-xs text-gray-400 mt-3 text-right">
+                      Total en el periodo: {serviceDist.reduce((a, s) => a + s.value, 0)} solicitudes
+                    </p>
+                  </CardContent>
+                </Card>
+              )}
+
             </TabsContent>
 
             {/* TAB: OPERACIONES - Vista de Usuarios */}
@@ -294,32 +683,29 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
               ) : (
                 <div className="space-y-4">
                   {users.map((u) => (
-                    <Card key={u.id}>
+                    <Card key={u.rut}>
                       <CardContent className="flex items-center justify-between pt-6">
                         <div className="flex-1">
-                          <div className="font-medium">{u.first_name || 'Usuario'} {u.last_name || ''}</div>
+                          <div className="font-medium">{getUserDisplayName(u)}</div>
                           <div className="text-sm text-gray-500">{u.email}</div>
+                          <div className="text-xs text-gray-400 mt-1">RUT: {u.rut}</div>
                         </div>
                         <div className="flex items-center gap-3">
                           <div className="text-sm text-gray-600 px-3 py-1 bg-gray-100 rounded">
-                            {u.disabled ? 'Deshabilitado' : 'Activo'}
+                            {u.activo ? 'Activo' : 'Deshabilitado'}
                           </div>
                           <Button
-                            variant={u.disabled ? 'secondary' : 'destructive'}
+                            variant={u.activo ? 'destructive' : 'secondary'}
                             size="sm"
-                            disabled={disablingUser === u.id}
+                            disabled={disablingUser === u.rut}
                             onClick={() => handleToggleUserDisable(u)}
                           >
-                            {disablingUser === u.id ? (
+                            {disablingUser === u.rut ? (
                               <>
                                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                                 Procesando...
                               </>
-                            ) : u.disabled ? (
-                              'Habilitar'
-                            ) : (
-                              'Deshabilitar'
-                            )}
+                            ) : u.activo ? 'Deshabilitar' : 'Habilitar'}
                           </Button>
                         </div>
                       </CardContent>

@@ -51,6 +51,7 @@ interface ProfessionalDocument {
   professionalId: string
   professionalName: string
   professionalEmail: string
+  rut: string
   specialty: string
   region: string
   commune: string
@@ -72,6 +73,17 @@ interface ProfessionalDocument {
 }
 
 export default function VerifierDashboard({ onLogout }: VerifierDashboardProps) {
+  const formatRut = (rut: number | string, dv: string): string => {
+    const parts: string[] = []
+    let remaining = String(rut)
+    while (remaining.length > 3) {
+      parts.unshift(remaining.slice(-3))
+      remaining = remaining.slice(0, -3)
+    }
+    parts.unshift(remaining)
+    return `${parts.join('.')}-${dv}`
+  }
+
   const [selectedProfessional, setSelectedProfessional] = useState<string | null>(null)
   const [viewingDocument, setViewingDocument] = useState<string | null>(null)
   const [viewingDocUrl, setViewingDocUrl] = useState<string | null>(null)
@@ -108,6 +120,7 @@ export default function VerifierDashboard({ onLogout }: VerifierDashboardProps) 
           professionalId: it.rut_usuario,
           professionalName: `${it.nombres} ${it.apellidos}`.trim(),
           professionalEmail: it.email,
+          rut: formatRut(it.rut_usuario, it.digito_verificador ?? ''),
           specialty: it.categoria,
           region: it.region || '',
           commune: it.comuna || '',
@@ -451,6 +464,10 @@ export default function VerifierDashboard({ onLogout }: VerifierDashboardProps) 
                         <p className="font-medium text-sm sm:text-base break-words">{selectedProfData.professionalName}</p>
                       </div>
                       <div>
+                        <label className="text-sm text-gray-600">RUT</label>
+                        <p className="font-medium text-sm sm:text-base">{selectedProfData.rut}</p>
+                      </div>
+                      <div>
                         <label className="text-sm text-gray-600">Email</label>
                         <p className="font-medium text-sm sm:text-base break-all">{selectedProfData.professionalEmail}</p>
                       </div>
@@ -468,7 +485,7 @@ export default function VerifierDashboard({ onLogout }: VerifierDashboardProps) 
                       </div>
                       <div>
                         <label className="text-sm text-gray-600">Experiencia en este Servicio</label>
-                        <p className="font-medium text-sm sm:text-base">{selectedProfData.personalInfo.experience}</p>
+                        <p className="font-medium text-sm sm:text-base">{selectedProfData.personalInfo.experience} {Number(selectedProfData.personalInfo.experience) === 1 ? 'año' : 'años'}</p>
                       </div>
                     </div>
                     <div>

@@ -31,8 +31,9 @@ class UsuarioDominio(models.Model):
 
 	Importante: Los campos deben reflejar exactamente las columnas reales de la tabla.
 	"""
-	# PK v3.0
-	rut = models.CharField(max_length=12, primary_key=True)
+	# PK v4.3 — parte numérica del RUT como entero
+	rut = models.IntegerField(primary_key=True)
+	digito_verificador = models.CharField(max_length=1)
 	# Campos obligatorios
 	nombres = models.CharField(max_length=100)
 	apellidos = models.CharField(max_length=100)
@@ -80,7 +81,7 @@ se gestionan por servicio en servicio_profesional.estado_verificacion.
 class ServicioProfesional(models.Model):
 	"""Unmanaged mapping for servicio_profesional table."""
 	id_servicio_profesional = models.UUIDField(primary_key=True)
-	rut_usuario = models.CharField(max_length=12)
+	rut_usuario = models.IntegerField()
 	id_categoria_servicio = models.UUIDField()
 	anos_experiencia = models.CharField(max_length=10)
 	descripcion = models.TextField()
@@ -104,13 +105,13 @@ class ServicioProfesional(models.Model):
 class DocumentoProfesional(models.Model):
 	"""Unmanaged mapping for documento_profesional table."""
 	id_documento_profesional = models.UUIDField(primary_key=True)
-	rut_usuario = models.CharField(max_length=12)
+	rut_usuario = models.IntegerField()
 	id_servicio_profesional = models.UUIDField(null=True)
 	tipo_documento = models.CharField(max_length=30)
 	url_archivo = models.TextField()
 	tipo_mime = models.CharField(max_length=100, null=True)
 	estado_verificacion = models.CharField(max_length=20)
-	rut_verificador = models.CharField(max_length=12, null=True)
+	rut_verificador = models.IntegerField(null=True)
 	verificado_en = models.DateTimeField(null=True)
 	razon_rechazo = models.TextField(null=True)
 	subido_en = models.DateTimeField()

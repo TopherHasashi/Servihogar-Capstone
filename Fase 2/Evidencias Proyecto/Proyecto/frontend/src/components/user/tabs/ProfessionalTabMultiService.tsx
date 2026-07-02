@@ -98,6 +98,8 @@ export default function ProfessionalTabMultiService({
   const [editServiceForm, setEditServiceForm] = useState<any>({})
   const [saveError, setSaveError] = useState<string | null>(null)
   const newExpInputRef = useRef<HTMLInputElement | null>(null)
+  const newCertInputRef = useRef<HTMLInputElement | null>(null)
+  const [newServiceCertFile, setNewServiceCertFile] = useState<File | null>(null)
 
   // Confirm dialog state (replaces window.confirm)
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; resolve: (ok: boolean) => void } | null>(null)
@@ -185,6 +187,13 @@ export default function ProfessionalTabMultiService({
       toast.error('Debes adjuntar al menos un documento de experiencia')
       return
     }
+    const hasApprovedService = userProfessionalProfile.services?.some(
+      s => s.verificationStatus === 'approved'
+    )
+    if (!hasApprovedService && !newServiceCertFile) {
+      toast.error('Debes adjuntar el certificado de antecedentes')
+      return
+    }
 
     // Enviar al backend para crear servicio adicional en estado pendiente
     try {
@@ -203,6 +212,9 @@ export default function ProfessionalTabMultiService({
       fd.append('price_fixed', String(newServiceForm.priceFixed))
       for (const f of newServiceExperienceFiles) {
         fd.append('experience_docs', f)
+      }
+      if (newServiceCertFile) {
+        fd.append('certificate', newServiceCertFile)
       }
 
       await apiPostForm('/api/professional/apply/', fd, { auth: true })
@@ -246,6 +258,7 @@ export default function ProfessionalTabMultiService({
         priceFixed: 25000
       })
       setNewServiceExperienceFiles([])
+      setNewServiceCertFile(null)
       toast.success('Solicitud enviada al verificador. Te avisaremos cuando se revise.')
     } catch (e: any) {
       toast.error(e?.message || 'Error desconocido')
@@ -1129,12 +1142,46 @@ export default function ProfessionalTabMultiService({
                         <p className="text-sm">
                           Para agregar este nuevo servicio, debes presentar documentación que respalde tu experiencia en {newServiceForm.categoryId ? serviceCategories.find(c => c.slug === newServiceForm.categoryId || c.id === newServiceForm.categoryId)?.name : 'la categoría seleccionada'}.
                         </p>
-                        <p className="text-xs text-green-600 font-medium">
-                          ✓ No necesitas volver a subir el certificado de antecedentes (ya verificado)
-                        </p>
+                        {userProfessionalProfile.services?.some(s => s.verificationStatus === 'approved') ? (
+                          <p className="text-xs text-green-600 font-medium">
+                            ✓ No necesitas volver a subir el certificado de antecedentes (ya verificado)
+                          </p>
+                        ) : (
+                          <p className="text-xs text-yellow-700 font-medium">
+                            ⚠️ Aún no tienes servicios aprobados, debes adjuntar el certificado de antecedentes.
+                          </p>
+                        )}
                       </div>
                     </AlertDescription>
                   </Alert>
+
+                  {!userProfessionalProfile.services?.some(s => s.verificationStatus === 'approved') && (
+                    <div>
+                      <Label>Certificado de Antecedentes (Obligatorio) *</Label>
+                      <div
+                        className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center mt-2 cursor-pointer hover:bg-gray-50"
+                        onClick={() => newCertInputRef.current?.click()}
+                      >
+                        <Upload className="w-6 h-6 text-gray-400 mx-auto mb-2" />
+                        <p className="text-sm text-gray-600">Arrastra tu certificado aquí o haz clic para seleccionar</p>
+                        <p className="text-xs text-gray-500 mt-1">PDF, JPG, PNG (máx. 5MB)</p>
+                        {newServiceCertFile && (
+                          <p className="text-sm text-green-700 mt-2">Seleccionado: {newServiceCertFile.name}</p>
+                        )}
+                        <input
+                          ref={newCertInputRef}
+                          type="file"
+                          accept="application/pdf,image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] || null
+                            if (f && f.size > 5 * 1024 * 1024) { toast.error('Archivo supera 5MB'); e.currentTarget.value = ''; return }
+                            setNewServiceCertFile(f)
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <Label>Documentación de Experiencia para este Servicio *</Label>
@@ -1184,7 +1231,10 @@ export default function ProfessionalTabMultiService({
                 <div className="flex gap-3">
                   <Button 
                     onClick={handleAddService}
-                    disabled={!newServiceForm.categoryId || !newServiceForm.description || newServiceExperienceFiles.length === 0}
+                    disabled={
+                      !newServiceForm.categoryId || !newServiceForm.description || newServiceExperienceFiles.length === 0 ||
+                      (!userProfessionalProfile.services?.some(s => s.verificationStatus === 'approved') && !newServiceCertFile)
+                    }
                   >
                     <Save className="w-4 h-4 mr-2" />
                     Enviar para Verificación

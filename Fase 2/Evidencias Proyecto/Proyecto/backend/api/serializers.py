@@ -173,8 +173,12 @@ class RegisterSerializer(serializers.Serializer):
             raise serializers.ValidationError("Formato de RUT inválido (ej: 12.345.678-9)")
         # No permitir crear un segundo usuario si el RUT ya existe en la tabla principal `usuario`
         try:
-            if UsuarioDominio.objects.filter(rut=v).exists():
+            import re as _re
+            rut_numerico = int(_re.sub(r'[^0-9]', '', v.split('-')[0]))
+            if UsuarioDominio.objects.filter(rut=rut_numerico).exists():
                 raise serializers.ValidationError("Este RUT ya está registrado en el sistema principal. Inicia sesión o recupera tu contraseña.")
+        except serializers.ValidationError:
+            raise
         except Exception:
             # Si la consulta falla (p.ej. DB no accesible), dejaremos que la vista haga el chequeo final
             pass

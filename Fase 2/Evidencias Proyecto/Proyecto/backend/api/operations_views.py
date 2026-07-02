@@ -15,6 +15,38 @@ from .permission_utils import get_user_role_by_email
 logger = logging.getLogger(__name__)
 
 
+def _table_exists(cur, table_name: str) -> bool:
+    try:
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
+            [table_name],
+        )
+        return cur.fetchone() is not None
+    except Exception:
+        try:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = %s",
+                [table_name],
+            )
+            return cur.fetchone() is not None
+        except Exception:
+            return False
+
+
+def _column_exists(cur, table_name: str, column_name: str) -> bool:
+    try:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+            [table_name, column_name],
+        )
+        if cur.fetchone() is not None:
+            return True
+        cur.execute(f"PRAGMA table_info({table_name})")
+        return any(row[1] == column_name for row in cur.fetchall())
+    except Exception:
+        return False
+
+
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
 def get_problematic_requests(request):
@@ -358,6 +390,30 @@ def get_users_list(request):
             page_size = min(int(request.GET.get('page_size', 20)), 100)
             offset = (page - 1) * page_size
 
+            has_historial_rol = _table_exists(cursor, "historial_rol_usuario") and _table_exists(cursor, "rol")
+            has_usuario_rol_column = _column_exists(cursor, "usuario", "rol")
+            role_select_sql = "u.rol"
+            role_filter_sql = "u.rol = %s"
+            role_cte_sql = ""
+            role_join_sql = ""
+            if has_historial_rol:
+                role_select_sql = "COALESCE(lr.nombre, 'cliente')"
+                role_filter_sql = "lr.nombre = %s"
+                role_cte_sql = """
+                WITH latest_roles AS (
+                    SELECT h.rut_usuario, r.nombre,
+                        ROW_NUMBER() OVER (PARTITION BY h.rut_usuario ORDER BY h.cambiado_en DESC) AS rn
+                    FROM historial_rol_usuario h
+                    JOIN rol r ON r.id_rol = h.id_rol
+                )
+                """
+                role_join_sql = "JOIN latest_roles lr ON lr.rut_usuario = u.rut AND lr.rn = 1"
+            elif not has_usuario_rol_column:
+                role_select_sql = "'cliente'"
+                role_filter_sql = None
+
+            auth_join_sql = "LEFT JOIN auth_user au ON au.email = u.email"
+
             # Filtros
             role_filter = request.GET.get('role', '').strip()
             search_filter = request.GET.get('search', '').strip()
@@ -367,8 +423,8 @@ def get_users_list(request):
             where_clauses = []
             params = []
 
-            if role_filter:
-                where_clauses.append("u.rol = %s")
+            if role_filter and role_filter_sql:
+                where_clauses.append(role_filter_sql)
                 params.append(role_filter)
 
             if search_filter:
@@ -376,22 +432,25 @@ def get_users_list(request):
                     (u.nombres ILIKE %s 
                      OR u.apellidos ILIKE %s 
                      OR u.email ILIKE %s 
-                     OR u.rut ILIKE %s)
+                     OR u.rut::TEXT ILIKE %s)
                 """)
                 search_pattern = f'%{search_filter}%'
                 params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
 
             if status_filter == 'activo':
-                where_clauses.append("u.activo = TRUE")
+                where_clauses.append("COALESCE(au.is_active, TRUE) = TRUE")
             elif status_filter == 'inactivo':
-                where_clauses.append("u.activo = FALSE")
+                where_clauses.append("COALESCE(au.is_active, TRUE) = FALSE")
 
             where_sql = ' AND '.join(where_clauses) if where_clauses else '1=1'
 
             # Contar total de registros
             count_query = f"""
+                {role_cte_sql}
                 SELECT COUNT(*) 
                 FROM usuario u
+                {role_join_sql}
+                {auth_join_sql}
                 WHERE {where_sql}
             """
             cursor.execute(count_query, params)
@@ -399,21 +458,24 @@ def get_users_list(request):
 
             # Obtener usuarios con paginación
             list_query = f"""
+                {role_cte_sql}
                 SELECT 
                     u.rut,
                     u.nombres,
                     u.apellidos,
                     u.email,
                     u.telefono,
-                    u.rol,
-                    u.activo,
-                    u.fecha_registro,
+                    {role_select_sql} as rol,
+                    COALESCE(au.is_active, TRUE) as activo,
+                    u.creado_en,
                     u.ultima_actividad,
                     (SELECT COUNT(*) FROM solicitud_servicio WHERE rut_cliente = u.rut) as solicitudes_como_cliente,
                     (SELECT COUNT(*) FROM solicitud_servicio WHERE rut_profesional = u.rut) as solicitudes_como_profesional
                 FROM usuario u
+                {role_join_sql}
+                {auth_join_sql}
                 WHERE {where_sql}
-                ORDER BY u.fecha_registro DESC
+                ORDER BY u.creado_en DESC
                 LIMIT %s OFFSET %s
             """
             cursor.execute(list_query, params + [page_size, offset])
@@ -491,21 +553,28 @@ def toggle_user_status(request, rut):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Actualizar el estado del usuario
-            cursor.execute("""
-                UPDATE usuario
-                SET activo = %s,
-                    actualizado_en = NOW()
-                WHERE rut = %s
-                RETURNING rut, nombres, apellidos, email, rol, activo
-            """, [nuevo_estado, rut])
-
-            row = cursor.fetchone()
-            if not row:
+            # Verificar que el usuario existe
+            cursor.execute("SELECT rut, nombres, apellidos, email FROM usuario WHERE rut = %s", [rut])
+            usuario_row = cursor.fetchone()
+            if not usuario_row:
                 return Response(
                     {'error': 'Usuario no encontrado'},
                     status=status.HTTP_404_NOT_FOUND
                 )
+
+            # Actualizar el estado en auth_user (controla el acceso al sistema)
+            cursor.execute("""
+                UPDATE auth_user
+                SET is_active = %s
+                WHERE email = %s
+            """, [nuevo_estado, usuario_row[3]])
+
+            # Actualizar timestamp en usuario
+            cursor.execute("""
+                UPDATE usuario SET actualizado_en = NOW() WHERE rut = %s
+            """, [rut])
+
+            row = usuario_row
 
             # Registrar el cambio en logs (opcional - podría ser una tabla de auditoría)
             logger.info(
@@ -513,14 +582,16 @@ def toggle_user_status(request, rut):
                 f"por admin {admin_email}. Razón: {razon}"
             )
 
+            user_role = get_user_role_by_email(cursor, row[3])
+
             return Response({
                 'message': f'Usuario {"habilitado" if nuevo_estado else "deshabilitado"} exitosamente',
                 'user': {
                     'rut': row[0],
                     'nombre_completo': f"{row[1]} {row[2]}",
                     'email': row[3],
-                    'rol': row[4],
-                    'activo': row[5]
+                    'rol': user_role,
+                    'activo': nuevo_estado
                 }
             }, status=status.HTTP_200_OK)
 

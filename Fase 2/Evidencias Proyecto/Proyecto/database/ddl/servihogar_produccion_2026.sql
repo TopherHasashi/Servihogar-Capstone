@@ -304,7 +304,8 @@ ON CONFLICT (nombre) DO NOTHING;
 -- ═══════════════════════════════════════════════════════════════════════════════════
 
 CREATE TABLE usuario (
-    rut VARCHAR(12) PRIMARY KEY,
+    rut INTEGER PRIMARY KEY,
+    digito_verificador CHAR(1) NOT NULL CHECK (digito_verificador ~ '^[0-9K]$'),
     nombres VARCHAR(100) NOT NULL,
     apellidos VARCHAR(100) NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
@@ -326,7 +327,8 @@ CREATE TABLE usuario (
 );
 
 COMMENT ON TABLE usuario IS 'Tabla central de usuarios con sistema multi-rol';
-COMMENT ON COLUMN usuario.rut IS 'RUT chileno formato 12.345.678-9 - CLAVE PRIMARIA';
+COMMENT ON COLUMN usuario.rut IS 'Parte numérica del RUT chileno como entero (ej: 12345678) - CLAVE PRIMARIA';
+COMMENT ON COLUMN usuario.digito_verificador IS 'Dígito verificador del RUT: 0-9 o K (CHAR 1 carácter)';
 COMMENT ON COLUMN usuario.id_comuna IS 'Comuna de residencia - región se obtiene mediante JOIN';
 
 -- ═══════════════════════════════════════════════════════════════════════════════════
@@ -337,7 +339,7 @@ COMMENT ON COLUMN usuario.id_comuna IS 'Comuna de residencia - región se obtien
 
 CREATE TABLE servicio_profesional (
     id_servicio_profesional UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    rut_usuario VARCHAR(12) NOT NULL REFERENCES usuario(rut) ON DELETE CASCADE,
+    rut_usuario INTEGER NOT NULL REFERENCES usuario(rut) ON DELETE CASCADE,
     id_categoria_servicio UUID NOT NULL REFERENCES categoria_servicio(id_categoria_servicio),
 
     -- CONFIGURACIÓN ESPECÍFICA POR SERVICIO
@@ -354,7 +356,7 @@ CREATE TABLE servicio_profesional (
     precio_fijo INTEGER NOT NULL CHECK (precio_fijo > 0),
 
     -- VERIFICACIÓN (quién verificó y motivo de rechazo; estado en historial)
-    rut_verificador VARCHAR(12) REFERENCES usuario(rut),
+    rut_verificador INTEGER REFERENCES usuario(rut),
     verificado_en TIMESTAMP,
     razon_rechazo TEXT,
 
@@ -424,7 +426,7 @@ COMMENT ON TABLE dia_bloqueado IS 'Días específicos bloqueados - Nivel 3';
 
 CREATE TABLE documento_profesional (
     id_documento_profesional UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    rut_usuario VARCHAR(12) NOT NULL REFERENCES usuario(rut) ON DELETE CASCADE,
+    rut_usuario INTEGER NOT NULL REFERENCES usuario(rut) ON DELETE CASCADE,
     id_servicio_profesional UUID REFERENCES servicio_profesional(id_servicio_profesional) ON DELETE SET NULL,
 
     tipo_documento VARCHAR(30) NOT NULL CHECK (tipo_documento IN (
@@ -435,7 +437,7 @@ CREATE TABLE documento_profesional (
 
     estado_verificacion VARCHAR(20) DEFAULT 'pendiente'
         CHECK (estado_verificacion IN ('pendiente', 'aprobado', 'rechazado')),
-    rut_verificador VARCHAR(12) REFERENCES usuario(rut),
+    rut_verificador INTEGER REFERENCES usuario(rut),
     verificado_en TIMESTAMP,
     razon_rechazo TEXT,
 
@@ -453,8 +455,8 @@ COMMENT ON COLUMN documento_profesional.id_servicio_profesional IS 'NULL=anteced
 
 CREATE TABLE solicitud_servicio (
     id_solicitud_servicio UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    rut_cliente VARCHAR(12) NOT NULL REFERENCES usuario(rut),
-    rut_profesional VARCHAR(12) REFERENCES usuario(rut),
+    rut_cliente INTEGER NOT NULL REFERENCES usuario(rut),
+    rut_profesional INTEGER REFERENCES usuario(rut),
     id_servicio_profesional UUID REFERENCES servicio_profesional(id_servicio_profesional),
 
     titulo VARCHAR(200) NOT NULL,
@@ -489,8 +491,8 @@ COMMENT ON COLUMN solicitud_servicio.precio_total IS 'Precio fijo al momento de 
 CREATE TABLE resena (
     id_resena UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     id_solicitud_servicio UUID NOT NULL UNIQUE REFERENCES solicitud_servicio(id_solicitud_servicio),
-    rut_evaluador VARCHAR(12) NOT NULL REFERENCES usuario(rut),
-    rut_evaluado VARCHAR(12) NOT NULL REFERENCES usuario(rut),
+    rut_evaluador INTEGER NOT NULL REFERENCES usuario(rut),
+    rut_evaluado INTEGER NOT NULL REFERENCES usuario(rut),
 
     comentario TEXT,
     calificacion_puntualidad INTEGER CHECK (calificacion_puntualidad >= 1 AND calificacion_puntualidad <= 5),
@@ -512,7 +514,7 @@ COMMENT ON TABLE resena IS 'Reseñas y calificaciones de servicios';
 
 CREATE TABLE notificacion (
     id_notificacion UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    rut_usuario VARCHAR(12) NOT NULL REFERENCES usuario(rut),
+    rut_usuario INTEGER NOT NULL REFERENCES usuario(rut),
     titulo VARCHAR(200) NOT NULL,
     mensaje TEXT NOT NULL,
     creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -528,7 +530,7 @@ COMMENT ON TABLE notificacion IS 'Notificaciones para usuarios';
 
 -- usuario ── historial_genero_usuario ── genero
 CREATE TABLE historial_genero_usuario (
-    rut_usuario VARCHAR(12) NOT NULL REFERENCES usuario(rut) ON DELETE CASCADE,
+    rut_usuario INTEGER NOT NULL REFERENCES usuario(rut) ON DELETE CASCADE,
     id_genero UUID NOT NULL REFERENCES genero(id_genero),
     cambiado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (rut_usuario, id_genero)
@@ -540,7 +542,7 @@ COMMENT ON TABLE historial_genero_usuario IS 'Intersección usuario ↔ genero c
 
 -- usuario ── historial_rol_usuario ── rol
 CREATE TABLE historial_rol_usuario (
-    rut_usuario VARCHAR(12) NOT NULL REFERENCES usuario(rut) ON DELETE CASCADE,
+    rut_usuario INTEGER NOT NULL REFERENCES usuario(rut) ON DELETE CASCADE,
     id_rol UUID NOT NULL REFERENCES rol(id_rol),
     cambiado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (rut_usuario, id_rol)
@@ -643,22 +645,21 @@ CREATE TRIGGER trigger_actualizar_solicitud_servicio
 
 -- ─────────────────────────────────────────────────────────────────────────────────
 -- Función para validar RUT chileno (dígito verificador)
-CREATE OR REPLACE FUNCTION validar_rut_chileno(rut VARCHAR)
+-- Parámetros: rut_numeros = parte numérica del RUT como INTEGER (ej: 12345678)
+--             dv          = dígito verificador CHAR(1) sin guión (ej: '9' o 'K')
+CREATE OR REPLACE FUNCTION validar_rut_chileno(rut_numeros INTEGER, dv CHAR(1))
 RETURNS BOOLEAN AS $$
 DECLARE
-    rut_numeros VARCHAR;
-    digito_verificador CHAR(1);
+    rut_str VARCHAR;
     suma INTEGER := 0;
     multiplicador INTEGER := 2;
     resto INTEGER;
     digito_calculado CHAR(1);
 BEGIN
-    rut_numeros := REPLACE(REPLACE(rut, '.', ''), '-', '');
-    digito_verificador := SUBSTRING(rut_numeros FROM LENGTH(rut_numeros));
-    rut_numeros := SUBSTRING(rut_numeros FROM 1 FOR LENGTH(rut_numeros) - 1);
+    rut_str := rut_numeros::VARCHAR;
 
-    FOR i IN REVERSE 1..LENGTH(rut_numeros) LOOP
-        suma := suma + (SUBSTRING(rut_numeros FROM i FOR 1)::INTEGER * multiplicador);
+    FOR i IN REVERSE 1..LENGTH(rut_str) LOOP
+        suma := suma + (SUBSTRING(rut_str FROM i FOR 1)::INTEGER * multiplicador);
         multiplicador := multiplicador + 1;
         IF multiplicador > 7 THEN multiplicador := 2; END IF;
     END LOOP;
@@ -670,11 +671,11 @@ BEGIN
     ELSE digito_calculado := resto::CHAR(1);
     END IF;
 
-    RETURN UPPER(digito_verificador) = UPPER(digito_calculado);
+    RETURN UPPER(dv) = UPPER(digito_calculado);
 END;
 $$ LANGUAGE plpgsql;
 
-COMMENT ON FUNCTION validar_rut_chileno IS 'Valida el dígito verificador de un RUT chileno usando algoritmo Módulo 11';
+COMMENT ON FUNCTION validar_rut_chileno IS 'Valida el dígito verificador de un RUT chileno. Recibe rut_numeros (INTEGER, ej: 12345678) y dv (CHAR 1, ej: 9 o K)';
 
 -- ═══════════════════════════════════════════════════════════════════════════════════
 -- 15. CONSTRAINT: MÁXIMO 3 SERVICIOS POR PROFESIONAL
