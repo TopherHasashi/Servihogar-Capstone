@@ -149,70 +149,39 @@ def admin_dashboard_summary(request):
 			if last_period_users > 0:
 				user_growth = round(((active_users - last_period_users) / last_period_users) * 100, 1)
 			
-			# 3. PROFESIONALES ACTIVOS (profesionales que han confirmado al menos 1 solicitud en 30 días)
+			# 3. PROFESIONALES ACTIVOS (profesionales con solicitudes confirmadas/completadas en 30 días)
+			# Usa columnas de timestamp directas (historial_estado_solicitud no es poblado por la app)
 			active_professionals = 0
-			if has_solicitud and has_historial_estado:
-				cur.execute(
-					"""
-					WITH latest_estado AS (
-						SELECT h.id_solicitud_servicio, es.nombre,
-							ROW_NUMBER() OVER (PARTITION BY h.id_solicitud_servicio ORDER BY h.cambiado_en DESC) AS rn
-						FROM historial_estado_solicitud h
-						JOIN estado_solicitud es ON es.id_estado_solicitud = h.id_estado_solicitud
-					)
-					SELECT COUNT(DISTINCT s.rut_profesional) as active_professionals
-					FROM solicitud_servicio s
-					JOIN latest_estado le ON le.id_solicitud_servicio = s.id_solicitud_servicio AND le.rn = 1
-					WHERE le.nombre IN ('confirmado', 'completado')
-					  AND s.actualizado_en >= %s
-					""",
-					[thirty_days_ago]
-				)
-			elif has_solicitud:
+			if has_solicitud:
 				cur.execute(
 					"""
 					SELECT COUNT(DISTINCT rut_profesional) as active_professionals
 					FROM solicitud_servicio
-					WHERE estado IN ('confirmado', 'completado')
-					  AND actualizado_en >= %s
+					WHERE rut_profesional IS NOT NULL
+					  AND (
+					    (confirmado_en IS NOT NULL AND confirmado_en >= %s) OR
+					    (completado_en IS NOT NULL AND completado_en >= %s)
+					  )
 					""",
-					[thirty_days_ago]
+					[thirty_days_ago, thirty_days_ago]
 				)
-			if has_solicitud:
 				active_professionals = cur.fetchone()[0] or 0
 			
-			# Profesionales activos del periodo anterior
+			# Profesionales activos del periodo anterior (30-60 días atrás)
 			last_period_professionals = 0
-			if has_solicitud and has_historial_estado:
-				cur.execute(
-					"""
-					WITH latest_estado AS (
-						SELECT h.id_solicitud_servicio, es.nombre,
-							ROW_NUMBER() OVER (PARTITION BY h.id_solicitud_servicio ORDER BY h.cambiado_en DESC) AS rn
-						FROM historial_estado_solicitud h
-						JOIN estado_solicitud es ON es.id_estado_solicitud = h.id_estado_solicitud
-					)
-					SELECT COUNT(DISTINCT s.rut_profesional) as active_professionals
-					FROM solicitud_servicio s
-					JOIN latest_estado le ON le.id_solicitud_servicio = s.id_solicitud_servicio AND le.rn = 1
-					WHERE le.nombre IN ('confirmado', 'completado')
-					  AND s.actualizado_en >= %s
-					  AND s.actualizado_en < %s
-					""",
-					[sixty_days_ago, thirty_days_ago]
-				)
-			elif has_solicitud:
+			if has_solicitud:
 				cur.execute(
 					"""
 					SELECT COUNT(DISTINCT rut_profesional) as active_professionals
 					FROM solicitud_servicio
-					WHERE estado IN ('confirmado', 'completado')
-					  AND actualizado_en >= %s
-					  AND actualizado_en < %s
+					WHERE rut_profesional IS NOT NULL
+					  AND (
+					    (confirmado_en IS NOT NULL AND confirmado_en >= %s AND confirmado_en < %s) OR
+					    (completado_en IS NOT NULL AND completado_en >= %s AND completado_en < %s)
+					  )
 					""",
-					[sixty_days_ago, thirty_days_ago]
+					[sixty_days_ago, thirty_days_ago, sixty_days_ago, thirty_days_ago]
 				)
-			if has_solicitud:
 				last_period_professionals = cur.fetchone()[0] or 0
 			
 			professional_growth = 0
@@ -253,38 +222,19 @@ def admin_dashboard_summary(request):
 				rating_change = 0
 			
 			# 5. TASA DE COMPLETACIÓN (% de solicitudes que se completan exitosamente)
-			if has_solicitud and has_historial_estado:
-				cur.execute(
-					"""
-					WITH latest_estado AS (
-						SELECT h.id_solicitud_servicio, es.nombre,
-							ROW_NUMBER() OVER (PARTITION BY h.id_solicitud_servicio ORDER BY h.cambiado_en DESC) AS rn
-						FROM historial_estado_solicitud h
-						JOIN estado_solicitud es ON es.id_estado_solicitud = h.id_estado_solicitud
-					)
-					SELECT 
-						SUM(CASE WHEN le.nombre = 'completado' THEN 1 ELSE 0 END) as completed,
-						COUNT(*) as total
-					FROM solicitud_servicio s
-					JOIN latest_estado le ON le.id_solicitud_servicio = s.id_solicitud_servicio AND le.rn = 1
-					WHERE s.creado_en >= %s
-					  AND le.nombre NOT IN ('cancelado')
-					""",
-					[thirty_days_ago]
-				)
-			elif has_solicitud:
+			# Usa columnas de timestamp directas (historial_estado_solicitud no es poblado por la app)
+			if has_solicitud:
 				cur.execute(
 					"""
 					SELECT 
-						SUM(CASE WHEN estado = 'completado' THEN 1 ELSE 0 END) as completed,
+						COUNT(CASE WHEN completado_en IS NOT NULL THEN 1 END) as completed,
 						COUNT(*) as total
 					FROM solicitud_servicio
 					WHERE creado_en >= %s
-					  AND estado NOT IN ('cancelado')
+					  AND cancelado_en IS NULL
 					""",
 					[thirty_days_ago]
 				)
-			if has_solicitud:
 				completion_row = cur.fetchone()
 				completed_count = completion_row[0] or 0
 				total_count = completion_row[1] or 0
@@ -292,37 +242,21 @@ def admin_dashboard_summary(request):
 			else:
 				completion_rate = 0
 			
-			# 6. TIEMPO PROMEDIO DE RESPUESTA (tiempo desde pendiente hasta confirmado)
-			if has_solicitud and has_historial_estado:
+			# 6. TIEMPO PROMEDIO DE RESPUESTA (desde creado_en hasta confirmado_en)
+			# Usa confirmado_en directamente — columna mantenida por la app
+			if has_solicitud:
 				cur.execute(
 					"""
-					WITH latest_estado AS (
-						SELECT h.id_solicitud_servicio, es.nombre,
-							ROW_NUMBER() OVER (PARTITION BY h.id_solicitud_servicio ORDER BY h.cambiado_en DESC) AS rn
-						FROM historial_estado_solicitud h
-						JOIN estado_solicitud es ON es.id_estado_solicitud = h.id_estado_solicitud
-					)
-					SELECT AVG(EXTRACT(EPOCH FROM (s.actualizado_en - s.creado_en)) / 3600) as avg_hours
-					FROM solicitud_servicio s
-					JOIN latest_estado le ON le.id_solicitud_servicio = s.id_solicitud_servicio AND le.rn = 1
-					WHERE le.nombre IN ('confirmado', 'completado')
-					  AND s.creado_en >= %s
-					  AND s.actualizado_en IS NOT NULL
-					""",
-					[thirty_days_ago]
-				)
-			elif has_solicitud:
-				cur.execute(
-					"""
-					SELECT AVG(EXTRACT(EPOCH FROM (actualizado_en - creado_en)) / 3600) as avg_hours
+					SELECT AVG(EXTRACT(EPOCH FROM (confirmado_en - creado_en)) / 3600) as avg_hours
 					FROM solicitud_servicio
-					WHERE estado IN ('confirmado', 'completado')
+					WHERE confirmado_en IS NOT NULL
 					  AND creado_en >= %s
-					  AND actualizado_en IS NOT NULL
 					""",
 					[thirty_days_ago]
 				)
-			avg_response_time = round(float(cur.fetchone()[0] or 0), 1) if has_solicitud else 0
+				avg_response_time = round(float(cur.fetchone()[0] or 0), 1)
+			else:
+				avg_response_time = 0
 			
 			# 7. DISTRIBUCIÓN DE SERVICIOS
 			service_distribution = []
@@ -353,29 +287,29 @@ def admin_dashboard_summary(request):
 					})
 			
 			# 8. TOTAL DE PROFESIONALES
-			if has_usuario and has_historial_rol:
+			# Fuente de verdad: servicio_profesional con estado aprobado en historial
+			# (historial_rol_usuario no se actualiza cuando se aprueba un profesional)
+			has_hev_check = _table_exists(cur, "historial_estado_verificacion_servicio")
+			if has_servicio_profesional and has_hev_check:
 				cur.execute(
 					"""
-					WITH latest_roles AS (
-						SELECT h.rut_usuario, r.nombre,
-							ROW_NUMBER() OVER (PARTITION BY h.rut_usuario ORDER BY h.cambiado_en DESC) AS rn
-						FROM historial_rol_usuario h
-						JOIN rol r ON r.id_rol = h.id_rol
+					SELECT COUNT(DISTINCT sp.rut_usuario) as total_professionals
+					FROM servicio_profesional sp
+					WHERE 'aprobado' = (
+						SELECT evs.nombre
+						FROM historial_estado_verificacion_servicio h
+						JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+						WHERE h.id_servicio_profesional = sp.id_servicio_profesional
+						ORDER BY h.cambiado_en DESC LIMIT 1
 					)
-					SELECT COUNT(*) as total_professionals
-					FROM latest_roles
-					WHERE rn = 1 AND nombre = 'profesional'
 					"""
 				)
+				total_professionals = cur.fetchone()[0] or 0
 			elif has_usuario:
-				cur.execute(
-					"""
-					SELECT COUNT(*) as total_professionals
-					FROM usuario
-					WHERE rol = 'profesional'
-					"""
-				)
-			total_professionals = cur.fetchone()[0] or 0 if has_usuario else 0
+				cur.execute("SELECT COUNT(*) FROM usuario WHERE rol = 'profesional'")
+				total_professionals = cur.fetchone()[0] or 0
+			else:
+				total_professionals = 0
 			
 			# 9. TOP PERFORMERS (profesionales con calificación >= 4.8)
 			if has_resena:
@@ -393,38 +327,16 @@ def admin_dashboard_summary(request):
 				top_performers = 0
 			
 			# 10. SERVICIOS PROMEDIO POR PROFESIONAL
-			if has_solicitud and has_historial_estado:
-				cur.execute(
-					"""
-					WITH latest_estado AS (
-						SELECT h.id_solicitud_servicio, es.nombre,
-							ROW_NUMBER() OVER (PARTITION BY h.id_solicitud_servicio ORDER BY h.cambiado_en DESC) AS rn
-						FROM historial_estado_solicitud h
-						JOIN estado_solicitud es ON es.id_estado_solicitud = h.id_estado_solicitud
-					), professional_counts AS (
-						SELECT s.rut_profesional, COUNT(*) as service_count
-						FROM solicitud_servicio s
-						JOIN latest_estado le ON le.id_solicitud_servicio = s.id_solicitud_servicio AND le.rn = 1
-						WHERE s.creado_en >= %s
-						  AND le.nombre IN ('confirmado', 'completado')
-						GROUP BY s.rut_profesional
-					)
-					SELECT AVG(service_count) as avg_services
-					FROM professional_counts
-					""",
-					[thirty_days_ago]
-				)
-				avg_services_per_professional = round(float(cur.fetchone()[0] or 0), 1)
-			elif has_solicitud:
+			# Usa columnas de timestamp directas
+			if has_solicitud:
 				cur.execute(
 					"""
 					WITH professional_counts AS (
-						SELECT 
-							rut_profesional,
-							COUNT(*) as service_count
+						SELECT rut_profesional, COUNT(*) as service_count
 						FROM solicitud_servicio
 						WHERE creado_en >= %s
-						  AND estado IN ('confirmado', 'completado')
+						  AND rut_profesional IS NOT NULL
+						  AND (confirmado_en IS NOT NULL OR completado_en IS NOT NULL)
 						GROUP BY rut_profesional
 					)
 					SELECT AVG(service_count) as avg_services
@@ -437,50 +349,30 @@ def admin_dashboard_summary(request):
 				avg_services_per_professional = 0
 
 			# 11. CONTEOS TOTALES DE SOLICITUDES POR ESTADO (histórico completo)
+			# Deriva el estado desde columnas de timestamp (fuente de verdad de la app)
 			completed_services_total = 0
 			cancelled_services_total = 0
 			pending_services = 0
 			confirmed_services = 0
 			in_progress_services = 0
 
-			if has_solicitud and has_historial_estado:
-				cur.execute(
-					"""
-					WITH latest_estado AS (
-						SELECT h.id_solicitud_servicio, es.nombre,
-							ROW_NUMBER() OVER (PARTITION BY h.id_solicitud_servicio ORDER BY h.cambiado_en DESC) AS rn
-						FROM historial_estado_solicitud h
-						JOIN estado_solicitud es ON es.id_estado_solicitud = h.id_estado_solicitud
-					)
-					SELECT
-						SUM(CASE WHEN le.nombre = 'completado'   THEN 1 ELSE 0 END) AS completado,
-						SUM(CASE WHEN le.nombre = 'cancelado'    THEN 1 ELSE 0 END) AS cancelado,
-						SUM(CASE WHEN le.nombre = 'pendiente'    THEN 1 ELSE 0 END) AS pendiente,
-						SUM(CASE WHEN le.nombre = 'confirmado'   THEN 1 ELSE 0 END) AS confirmado,
-						SUM(CASE WHEN le.nombre = 'en_progreso'  THEN 1 ELSE 0 END) AS en_progreso
-					FROM solicitud_servicio s
-					JOIN latest_estado le ON le.id_solicitud_servicio = s.id_solicitud_servicio AND le.rn = 1
-					"""
-				)
-			elif has_solicitud:
+			if has_solicitud:
 				cur.execute(
 					"""
 					SELECT
-						SUM(CASE WHEN estado = 'completado'   THEN 1 ELSE 0 END),
-						SUM(CASE WHEN estado = 'cancelado'    THEN 1 ELSE 0 END),
-						SUM(CASE WHEN estado = 'pendiente'    THEN 1 ELSE 0 END),
-						SUM(CASE WHEN estado = 'confirmado'   THEN 1 ELSE 0 END),
-						SUM(CASE WHEN estado = 'en_progreso'  THEN 1 ELSE 0 END)
+						COUNT(CASE WHEN cancelado_en IS NOT NULL THEN 1 END) AS cancelado,
+						COUNT(CASE WHEN completado_en IS NOT NULL THEN 1 END) AS completado,
+						COUNT(CASE WHEN confirmado_en IS NOT NULL AND completado_en IS NULL AND cancelado_en IS NULL THEN 1 END) AS confirmado,
+						COUNT(CASE WHEN confirmado_en IS NULL AND cancelado_en IS NULL THEN 1 END) AS pendiente
 					FROM solicitud_servicio
 					"""
 				)
-			if has_solicitud:
 				row = cur.fetchone()
-				completed_services_total = int(row[0] or 0)
-				cancelled_services_total = int(row[1] or 0)
-				pending_services         = int(row[2] or 0)
-				confirmed_services       = int(row[3] or 0)
-				in_progress_services     = int(row[4] or 0)
+				cancelled_services_total = int(row[0] or 0)
+				completed_services_total = int(row[1] or 0)
+				confirmed_services       = int(row[2] or 0)
+				pending_services         = int(row[3] or 0)
+				in_progress_services     = 0  # iniciado_en nunca se establece en la app actual
 
 			# 12. USUARIOS: total histórico + nuevos este mes
 			total_users_all_time = 0
@@ -535,7 +427,29 @@ def admin_dashboard_summary(request):
 			has_doc = _table_exists(cur, "documento_profesional")
 			has_hev = _table_exists(cur, "historial_estado_verificacion_servicio")
 
-			if has_doc:
+			if has_doc and has_hev:
+				# Solo contar documentos cuyo servicio asociado siga en estado 'pendiente'.
+				# Los documentos de servicios ya aprobados/rechazados no necesitan revisión.
+				cur.execute(
+					"""
+					SELECT COUNT(*)
+					FROM documento_profesional dp
+					WHERE dp.estado_verificacion = 'pendiente'
+					  AND (
+					    dp.id_servicio_profesional IS NULL
+					    OR 'pendiente' = COALESCE(
+					        (SELECT evs.nombre
+					         FROM historial_estado_verificacion_servicio h
+					         JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+					         WHERE h.id_servicio_profesional = dp.id_servicio_profesional
+					         ORDER BY h.cambiado_en DESC LIMIT 1),
+					        'pendiente'
+					    )
+					  )
+					"""
+				)
+				pending_doc_verifications = int(cur.fetchone()[0] or 0)
+			elif has_doc:
 				cur.execute(
 					"SELECT COUNT(*) FROM documento_profesional WHERE estado_verificacion = 'pendiente'"
 				)
@@ -645,7 +559,7 @@ def admin_dashboard_summary(request):
 			},
 			"serviceDistribution": service_distribution,
 			"metadata": {
-				"periodStart": first_day_current_month.isoformat(),
+			"periodStart": thirty_days_ago.isoformat(),
 				"periodEnd": now.isoformat(),
 				"totalReviews": total_reviews
 			},

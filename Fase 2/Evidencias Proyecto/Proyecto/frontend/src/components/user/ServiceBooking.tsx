@@ -707,27 +707,7 @@ export default function ServiceBooking({ professional, user, onBack, onBookingCo
                       className="mt-2"
                     />
                   </div>
-                  <div>
-                    <Label htmlFor="payment-method">Método de pago preferido *</Label>
-                    <Select
-                      value={serviceDetails.preferredPaymentMethod}
-                      onValueChange={(value) =>
-                        setServiceDetails({ ...serviceDetails, preferredPaymentMethod: value })
-                      }
-                    >
-                      <SelectTrigger className="mt-2">
-                        <SelectValue placeholder="Selecciona método de pago" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="efectivo">Efectivo</SelectItem>
-                        <SelectItem value="transferencia">Transferencia bancaria</SelectItem>
-                        <SelectItem value="por_acordar">Por acordar con el profesional</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-gray-500 mt-1">
-                      El pago se realizará directamente con el profesional al momento del servicio
-                    </p>
-                  </div>
+
                   <Alert className="bg-blue-50 border-blue-200">
                     <AlertCircle className="h-4 w-4 text-blue-600" />
                     <AlertDescription className="text-sm text-blue-800">

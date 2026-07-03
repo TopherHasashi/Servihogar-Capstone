@@ -6,6 +6,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs"
 import { Button } from "../ui/button"
 import { Alert, AlertDescription } from "../ui/alert"
 import { Badge } from "../ui/badge"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../ui/alert-dialog"
 import { apiGetAuth, apiPutAuth } from "../../lib/api"
 import { 
   Users, 
@@ -29,6 +39,8 @@ import {
   XCircle,
   Timer,
   CalendarDays,
+  Phone,
+  IdCard,
 } from "lucide-react"
 
 interface AdminDashboardBIProps {
@@ -86,6 +98,8 @@ interface DashboardData {
 
 interface User {
   rut: string
+  digito_verificador?: string
+  rut_formateado?: string
   nombres?: string
   apellidos?: string
   nombre_completo?: string
@@ -97,10 +111,17 @@ interface User {
   ultima_actividad?: string
   solicitudes_como_cliente?: number
   solicitudes_como_profesional?: number
+  servicios_activos?: string[]
 }
 
 const getUserDisplayName = (user: User) => {
   return user.nombre_completo || `${user.nombres || 'Usuario'} ${user.apellidos || ''}`.trim() || 'Usuario'
+}
+
+const getRoleLabel = (rol?: string) => {
+  if (rol === 'profesional') return 'Trabajador'
+  if (rol === 'cliente') return 'Cliente'
+  return rol ? rol.charAt(0).toUpperCase() + rol.slice(1) : 'N/A'
 }
 
 export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
@@ -111,6 +132,7 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
   const [loadingUsers, setLoadingUsers] = useState(false)
   const [usersError, setUsersError] = useState<string | null>(null)
   const [disablingUser, setDisablingUser] = useState<string | null>(null)
+  const [userPendingConfirm, setUserPendingConfirm] = useState<User | null>(null)
 
   // Cargar datos del dashboard
   useEffect(() => {
@@ -195,10 +217,20 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
       )
 
       // Enviar al backend
-      await apiPutAuth(`/api/admin/operations/users/${user.rut}/toggle-status/`, { 
+      const result = await apiPutAuth(`/api/admin/operations/users/${user.rut}/toggle-status/`, { 
         activo: nuevoEstado 
       })
-      toast.success(nuevoEstado ? 'Usuario habilitado' : 'Usuario deshabilitado')
+
+      if (nuevoEstado) {
+        toast.success('Usuario habilitado')
+      } else {
+        const cancelledCount = result?.cancelled_requests ?? 0
+        toast.success(
+          cancelledCount > 0
+            ? `Usuario deshabilitado. Se cancelaron ${cancelledCount} solicitud(es) pendiente(s)/confirmada(s) y se notificó a los usuarios involucrados.`
+            : 'Usuario deshabilitado'
+        )
+      }
     } catch (err: any) {
       console.error('Error actualizando usuario:', err)
       toast.error('Error actualizando usuario: ' + err.message)
@@ -208,6 +240,22 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
       )
     } finally {
       setDisablingUser(null)
+    }
+  }
+
+  // Solicita confirmación antes de deshabilitar; habilitar no requiere confirmación
+  const handleRequestToggleUserDisable = (user: User) => {
+    if (user.activo) {
+      setUserPendingConfirm(user)
+    } else {
+      handleToggleUserDisable(user)
+    }
+  }
+
+  const confirmDisableUser = () => {
+    if (userPendingConfirm) {
+      handleToggleUserDisable(userPendingConfirm)
+      setUserPendingConfirm(null)
     }
   }
 
@@ -686,9 +734,41 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
                     <Card key={u.rut}>
                       <CardContent className="flex items-center justify-between pt-6">
                         <div className="flex-1">
-                          <div className="font-medium">{getUserDisplayName(u)}</div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <div className="font-medium">{getUserDisplayName(u)}</div>
+                            <Badge variant={u.rol === 'profesional' ? 'default' : 'secondary'}>
+                              {getRoleLabel(u.rol)}
+                            </Badge>
+                          </div>
                           <div className="text-sm text-gray-500">{u.email}</div>
-                          <div className="text-xs text-gray-400 mt-1">RUT: {u.rut}</div>
+                          <div className="flex items-center gap-4 flex-wrap text-xs text-gray-400 mt-1">
+                            <span className="flex items-center gap-1">
+                              <IdCard className="w-3 h-3" />
+                              {u.rut_formateado || u.rut}
+                            </span>
+                            {u.telefono && (
+                              <span className="flex items-center gap-1">
+                                <Phone className="w-3 h-3" />
+                                {u.telefono}
+                              </span>
+                            )}
+                          </div>
+                          {u.rol === 'profesional' && (
+                            <div className="flex items-start gap-1 mt-2">
+                              <Wrench className="w-3 h-3 text-gray-400 mt-1 shrink-0" />
+                              {u.servicios_activos && u.servicios_activos.length > 0 ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {u.servicios_activos.map((servicio) => (
+                                    <Badge key={servicio} variant="outline" className="text-xs">
+                                      {servicio}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span className="text-xs text-gray-400">Sin servicios activos</span>
+                              )}
+                            </div>
+                          )}
                         </div>
                         <div className="flex items-center gap-3">
                           <div className="text-sm text-gray-600 px-3 py-1 bg-gray-100 rounded">
@@ -698,7 +778,7 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
                             variant={u.activo ? 'destructive' : 'secondary'}
                             size="sm"
                             disabled={disablingUser === u.rut}
-                            onClick={() => handleToggleUserDisable(u)}
+                            onClick={() => handleRequestToggleUserDisable(u)}
                           >
                             {disablingUser === u.rut ? (
                               <>
@@ -717,6 +797,31 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
           </Tabs>
         )}
       </div>
+
+      {/* Confirmación antes de deshabilitar una cuenta */}
+      <AlertDialog open={!!userPendingConfirm} onOpenChange={(open) => !open && setUserPendingConfirm(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Deshabilitar esta cuenta?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {userPendingConfirm && (
+                <>
+                  Estás a punto de deshabilitar la cuenta de <strong>{getUserDisplayName(userPendingConfirm)}</strong>.
+                  {' '}Si tiene solicitudes de servicio pendientes o confirmadas (como cliente o profesional),
+                  se cancelarán automáticamente y se notificará a los usuarios involucrados indicando el motivo.
+                  Esta acción no se puede deshacer fácilmente.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setUserPendingConfirm(null)}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDisableUser} className="bg-red-600 hover:bg-red-700 text-white">
+              Sí, deshabilitar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

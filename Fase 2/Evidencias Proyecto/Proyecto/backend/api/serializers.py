@@ -1,5 +1,7 @@
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
+from django.db import connection
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -37,6 +39,16 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
             raise serializers.ValidationError(
                 'Credenciales inv\u00e1lidas: correo o contrase\u00f1a incorrectos.'
             )
+
+        # Actualizar ultima_actividad en la tabla usuario del dominio
+        try:
+            with connection.cursor() as cur:
+                cur.execute(
+                    "UPDATE usuario SET ultima_actividad = %s WHERE email = %s",
+                    [timezone.now(), user.email]
+                )
+        except Exception:
+            pass  # No fallar el login si esta actualización falla
 
         refresh = RefreshToken.for_user(user)
         return {

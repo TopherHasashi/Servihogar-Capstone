@@ -11,6 +11,7 @@ from django.utils import timezone
 from datetime import timedelta
 import logging
 from .permission_utils import get_user_role_by_email
+from .views import _create_notification, _get_user_by_rut
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,95 @@ def _column_exists(cur, table_name: str, column_name: str) -> bool:
         return any(row[1] == column_name for row in cur.fetchall())
     except Exception:
         return False
+
+
+def _format_rut(rut, digito_verificador) -> str:
+    """Formatea un RUT chileno como '11.111.111-1'."""
+    try:
+        rut_str = str(int(rut))
+    except (TypeError, ValueError):
+        return str(rut)
+
+    partes = []
+    while len(rut_str) > 3:
+        partes.insert(0, rut_str[-3:])
+        rut_str = rut_str[:-3]
+    partes.insert(0, rut_str)
+    rut_con_puntos = '.'.join(partes)
+
+    dv = str(digito_verificador).strip().upper() if digito_verificador is not None else ''
+    return f"{rut_con_puntos}-{dv}" if dv else rut_con_puntos
+
+
+def _cancel_active_requests_for_disabled_user(cursor, rut, nombre_completo: str) -> int:
+    """Cancela todas las solicitudes de servicio pendientes/confirmadas donde el usuario
+    (deshabilitado) participa como cliente o profesional, y notifica a la contraparte.
+
+    Retorna la cantidad de solicitudes canceladas.
+    """
+    now = timezone.now()
+    motivo = f"Servicio cancelado, razón: la cuenta de {nombre_completo} fue deshabilitada"
+
+    cursor.execute(
+        """
+        SELECT id_solicitud_servicio, rut_cliente, rut_profesional
+        FROM solicitud_servicio
+        WHERE (rut_cliente = %s OR rut_profesional = %s)
+          AND cancelado_en IS NULL
+          AND completado_en IS NULL
+        """,
+        [rut, rut],
+    )
+    active_requests = cursor.fetchall()
+
+    if not active_requests:
+        return 0
+
+    has_pago = _table_exists(cursor, "pago")
+
+    for id_solicitud, rut_cliente, rut_profesional in active_requests:
+        cursor.execute(
+            """
+            UPDATE solicitud_servicio
+            SET cancelado_en = %s, razon_cancelacion = %s, actualizado_en = %s
+            WHERE id_solicitud_servicio = %s
+            """,
+            [now, motivo, now, id_solicitud],
+        )
+
+        # Si hay un pago aprobado y no liberado, marcarlo en revisión (igual que booking_cancel)
+        if has_pago:
+            try:
+                cursor.execute(
+                    """
+                    UPDATE pago
+                    SET estado = 'en_revision', actualizado_en = %s
+                    WHERE id_solicitud_servicio = %s
+                      AND estado = 'aprobado'
+                      AND liberado_al_profesional_en IS NULL
+                    """,
+                    [now, id_solicitud],
+                )
+            except Exception as e:
+                logger.warning(f"No se pudo actualizar pago para solicitud {id_solicitud}: {e}")
+
+        # Notificar a la contraparte (quien no fue deshabilitado)
+        try:
+            rut_contraparte = rut_profesional if str(rut_cliente) == str(rut) else rut_cliente
+            if rut_contraparte:
+                notify_user = _get_user_by_rut(rut_contraparte)
+                if notify_user:
+                    _create_notification(
+                        notify_user,
+                        tipo='booking_cancelled',
+                        titulo='Solicitud cancelada',
+                        mensaje=motivo,
+                        extra={'request_id': str(id_solicitud), 'reason': motivo},
+                    )
+        except Exception as e:
+            logger.warning(f"Error enviando notificación de cuenta deshabilitada: {e}")
+
+    return len(active_requests)
 
 
 @api_view(['GET'])
@@ -392,13 +482,24 @@ def get_users_list(request):
 
             has_historial_rol = _table_exists(cursor, "historial_rol_usuario") and _table_exists(cursor, "rol")
             has_usuario_rol_column = _column_exists(cursor, "usuario", "rol")
-            role_select_sql = "u.rol"
-            role_filter_sql = "u.rol = %s"
+            has_digito_verificador = _column_exists(cursor, "usuario", "digito_verificador")
+            has_servicio_profesional = _table_exists(cursor, "servicio_profesional")
+            has_categoria_servicio = _table_exists(cursor, "categoria_servicio")
+            has_hev = _table_exists(cursor, "historial_estado_verificacion_servicio")
             role_cte_sql = ""
             role_join_sql = ""
+
+            # NOTA IMPORTANTE: ni usuario.rol (no existe en el esquema real de producción)
+            # ni historial_rol_usuario (solo se registra una vez al momento del registro y
+            # NUNCA se actualiza cuando un verificador aprueba un servicio profesional) son
+            # confiables para saber si un usuario es actualmente "profesional". La única
+            # fuente de verdad real es la existencia de al menos un registro en
+            # servicio_profesional cuyo estado de verificación más reciente (via
+            # historial_estado_verificacion_servicio) sea 'aprobado'. Por eso el rol base
+            # (historial/columna, usado para detectar administrador/verificador) se
+            # sobreescribe a 'profesional' cuando corresponde.
             if has_historial_rol:
-                role_select_sql = "COALESCE(lr.nombre, 'cliente')"
-                role_filter_sql = "lr.nombre = %s"
+                base_role_sql = "COALESCE(lr.nombre, 'cliente')"
                 role_cte_sql = """
                 WITH latest_roles AS (
                     SELECT h.rut_usuario, r.nombre,
@@ -408,9 +509,33 @@ def get_users_list(request):
                 )
                 """
                 role_join_sql = "JOIN latest_roles lr ON lr.rut_usuario = u.rut AND lr.rn = 1"
-            elif not has_usuario_rol_column:
-                role_select_sql = "'cliente'"
-                role_filter_sql = None
+            elif has_usuario_rol_column:
+                base_role_sql = "u.rol"
+            else:
+                base_role_sql = "'cliente'"
+
+            if has_servicio_profesional and has_categoria_servicio and has_hev:
+                is_professional_sql = f"""
+                    EXISTS (
+                        SELECT 1 FROM servicio_profesional sp_rol
+                        WHERE sp_rol.rut_usuario = u.rut
+                          AND 'aprobado' = COALESCE(
+                              (SELECT evs_rol.nombre
+                               FROM historial_estado_verificacion_servicio h_rol
+                               JOIN estado_verificacion_servicio evs_rol ON evs_rol.id_estado_verificacion_servicio = h_rol.id_estado_verificacion_servicio
+                               WHERE h_rol.id_servicio_profesional = sp_rol.id_servicio_profesional
+                               ORDER BY h_rol.cambiado_en DESC LIMIT 1),
+                              'pendiente'
+                          )
+                    )
+                """
+            elif has_servicio_profesional:
+                is_professional_sql = "EXISTS (SELECT 1 FROM servicio_profesional sp_rol WHERE sp_rol.rut_usuario = u.rut)"
+            else:
+                is_professional_sql = "FALSE"
+
+            role_select_sql = f"CASE WHEN {is_professional_sql} THEN 'profesional' ELSE {base_role_sql} END"
+            role_filter_sql = f"({role_select_sql}) = %s"
 
             auth_join_sql = "LEFT JOIN auth_user au ON au.email = u.email"
 
@@ -422,6 +547,18 @@ def get_users_list(request):
             # Construcción de la consulta base
             where_clauses = []
             params = []
+
+            # Excluir siempre cuentas de administrador y verificador:
+            # 1) Por columna rol en usuario (si existe)
+            if has_usuario_rol_column:
+                where_clauses.append("u.rol NOT IN ('administrador', 'verificador')")
+            # 2) Por historial de rol (solo si realmente se está usando el JOIN a latest_roles,
+            #    ya que u.rol tiene prioridad como fuente de verdad cuando existe)
+            if role_join_sql:
+                where_clauses.append("COALESCE(lr.nombre, 'cliente') NOT IN ('administrador', 'verificador')")
+            # 3) Por flags de Django auth (siempre aplica como red de seguridad)
+            where_clauses.append("COALESCE(au.is_superuser, FALSE) = FALSE")
+            where_clauses.append("COALESCE(au.is_staff, FALSE) = FALSE")
 
             if role_filter and role_filter_sql:
                 where_clauses.append(role_filter_sql)
@@ -456,6 +593,37 @@ def get_users_list(request):
             cursor.execute(count_query, params)
             total_count = cursor.fetchone()[0]
 
+            # RUT con dígito verificador (si la columna existe)
+            digito_select_sql = "u.digito_verificador" if has_digito_verificador else "NULL"
+
+            # Servicios activos (aprobados) que ofrece el profesional, resumidos por nombre de categoría
+            if has_servicio_profesional and has_categoria_servicio and has_hev:
+                servicios_activos_sql = """
+                    (SELECT STRING_AGG(cs.nombre, ', ' ORDER BY cs.nombre)
+                     FROM servicio_profesional sp
+                     JOIN categoria_servicio cs ON cs.id_categoria_servicio = sp.id_categoria_servicio
+                     WHERE sp.rut_usuario = u.rut
+                       AND 'aprobado' = COALESCE(
+                           (SELECT evs.nombre
+                            FROM historial_estado_verificacion_servicio h
+                            JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+                            WHERE h.id_servicio_profesional = sp.id_servicio_profesional
+                            ORDER BY h.cambiado_en DESC LIMIT 1),
+                           'pendiente'
+                       )
+                    ) as servicios_activos
+                """
+            elif has_servicio_profesional and has_categoria_servicio:
+                servicios_activos_sql = """
+                    (SELECT STRING_AGG(cs.nombre, ', ' ORDER BY cs.nombre)
+                     FROM servicio_profesional sp
+                     JOIN categoria_servicio cs ON cs.id_categoria_servicio = sp.id_categoria_servicio
+                     WHERE sp.rut_usuario = u.rut
+                    ) as servicios_activos
+                """
+            else:
+                servicios_activos_sql = "NULL as servicios_activos"
+
             # Obtener usuarios con paginación
             list_query = f"""
                 {role_cte_sql}
@@ -470,7 +638,9 @@ def get_users_list(request):
                     u.creado_en,
                     u.ultima_actividad,
                     (SELECT COUNT(*) FROM solicitud_servicio WHERE rut_cliente = u.rut) as solicitudes_como_cliente,
-                    (SELECT COUNT(*) FROM solicitud_servicio WHERE rut_profesional = u.rut) as solicitudes_como_profesional
+                    (SELECT COUNT(*) FROM solicitud_servicio WHERE rut_profesional = u.rut) as solicitudes_como_profesional,
+                    {digito_select_sql} as digito_verificador,
+                    {servicios_activos_sql}
                 FROM usuario u
                 {role_join_sql}
                 {auth_join_sql}
@@ -482,8 +652,16 @@ def get_users_list(request):
 
             users = []
             for row in cursor.fetchall():
+                digito_verificador = row[11]
+                rut_formateado = _format_rut(row[0], digito_verificador) if row[0] is not None else None
+                servicios_activos_raw = row[12]
+                servicios_activos = (
+                    [s.strip() for s in servicios_activos_raw.split(',')] if servicios_activos_raw else []
+                )
                 users.append({
                     'rut': row[0],
+                    'digito_verificador': digito_verificador,
+                    'rut_formateado': rut_formateado,
                     'nombres': row[1],
                     'apellidos': row[2],
                     'nombre_completo': f"{row[1]} {row[2]}",
@@ -494,7 +672,8 @@ def get_users_list(request):
                     'fecha_registro': row[7].isoformat() if row[7] else None,
                     'ultima_actividad': row[8].isoformat() if row[8] else None,
                     'solicitudes_como_cliente': row[9] or 0,
-                    'solicitudes_como_profesional': row[10] or 0
+                    'solicitudes_como_profesional': row[10] or 0,
+                    'servicios_activos': servicios_activos
                 })
 
             # Calcular paginación
@@ -575,20 +754,32 @@ def toggle_user_status(request, rut):
             """, [rut])
 
             row = usuario_row
+            nombre_completo = f"{row[1]} {row[2]}"
+
+            # Si se está deshabilitando la cuenta, cancelar sus solicitudes activas
+            # (pendientes o confirmadas) tanto como cliente o como profesional, y
+            # notificar a la contraparte con el motivo.
+            cancelled_requests_count = 0
+            if not nuevo_estado:
+                cancelled_requests_count = _cancel_active_requests_for_disabled_user(
+                    cursor, rut, nombre_completo
+                )
 
             # Registrar el cambio en logs (opcional - podría ser una tabla de auditoría)
             logger.info(
                 f"Usuario {rut} {'habilitado' if nuevo_estado else 'deshabilitado'} "
-                f"por admin {admin_email}. Razón: {razon}"
+                f"por admin {admin_email}. Razón: {razon}. "
+                f"Solicitudes canceladas: {cancelled_requests_count}"
             )
 
             user_role = get_user_role_by_email(cursor, row[3])
 
             return Response({
                 'message': f'Usuario {"habilitado" if nuevo_estado else "deshabilitado"} exitosamente',
+                'cancelled_requests': cancelled_requests_count,
                 'user': {
                     'rut': row[0],
-                    'nombre_completo': f"{row[1]} {row[2]}",
+                    'nombre_completo': nombre_completo,
                     'email': row[3],
                     'rol': user_role,
                     'activo': nuevo_estado

@@ -1655,10 +1655,24 @@ def verify_service(request, servicio_id: str):
 				count = cur.fetchone()[0]
 				
 				# Verificar cuántos servicios aprobados tiene este profesional
+				# NOTA: servicio_profesional NO tiene columna "estado_verificacion" (no existe
+				# en el esquema real); el estado se determina via el último registro en
+				# historial_estado_verificacion_servicio. La consulta anterior a una columna
+				# inexistente lanzaba una excepción silenciosa en cada aprobación, impidiendo
+				# que se creara el horario predeterminado (por eso los servicios aprobados no
+				# aparecían en la búsqueda pública).
 				cur.execute(
 					"""
-					SELECT COUNT(*) FROM servicio_profesional 
-					WHERE rut_usuario = %s AND estado_verificacion = 'aprobado'
+					SELECT COUNT(*) FROM servicio_profesional sp2
+					WHERE sp2.rut_usuario = %s
+					  AND 'aprobado' = COALESCE(
+					      (SELECT evs.nombre
+					       FROM historial_estado_verificacion_servicio h
+					       JOIN estado_verificacion_servicio evs ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+					       WHERE h.id_servicio_profesional = sp2.id_servicio_profesional
+					       ORDER BY h.cambiado_en DESC LIMIT 1),
+					      'pendiente'
+					  )
 					""",
 					[rut_u]
 				)
@@ -1668,8 +1682,10 @@ def verify_service(request, servicio_id: str):
 				# 1. No existe horario para este servicio
 				# 2. Es el PRIMER servicio aprobado del profesional
 				if count == 0 and total_servicios_aprobados == 1:
-					# Crear horario para lunes (1) a viernes (5)
-					for dia in range(1, 6):  # 1=Lunes, 2=Martes, 3=Miércoles, 4=Jueves, 5=Viernes
+					# Crear horario para lunes a viernes.
+					# NOTA: dia_semana usa la convención 0=Lunes .. 6=Domingo (ver
+					# database/fixes/migrate_weekday_index_to_monday_zero.sql), no 1=Lunes.
+					for dia in range(0, 5):  # 0=Lunes, 1=Martes, 2=Miércoles, 3=Jueves, 4=Viernes
 						cur.execute(
 							"""
 							INSERT INTO horario_profesional (

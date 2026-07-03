@@ -238,17 +238,7 @@ export default function ProfileTab({ user, onUpdateUser }: ProfileTabProps) {
           <div>
             <h3 className="text-xl font-semibold">{user.name}</h3>
             <p className="text-gray-600">{user.email}</p>
-            <div className="mt-2">
-              {isProfessional ? (
-                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                  Profesional Verificado
-                </span>
-              ) : (
-                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                  Cliente
-                </span>
-              )}
-            </div>
+            
           </div>
         </div>
 
@@ -418,14 +408,7 @@ export default function ProfileTab({ user, onUpdateUser }: ProfileTabProps) {
               <span className="text-gray-500">Último acceso:</span>
               <span className="ml-2">Hace 2 horas</span>
             </div>
-            <div>
-              <span className="text-gray-500">Estado de verificación:</span>
-              <span className="ml-2 text-green-600">Verificado</span>
-            </div>
-            <div>
-              <span className="text-gray-500">Tipo de cuenta:</span>
-              <span className="ml-2">{isProfessional ? "Profesional" : "Cliente"}</span>
-            </div>
+
           </div>
         </div>
       </CardContent>
