@@ -10,6 +10,7 @@ from django.db import connection
 from django.utils import timezone
 from datetime import timedelta
 import logging
+import uuid
 from .permission_utils import get_user_role_by_email
 from .views import _create_notification, _get_user_by_rut
 
@@ -40,8 +41,10 @@ def _column_exists(cur, table_name: str, column_name: str) -> bool:
             "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
             [table_name, column_name],
         )
-        if cur.fetchone() is not None:
-            return True
+        return cur.fetchone() is not None
+    except Exception:
+        pass
+    try:
         cur.execute(f"PRAGMA table_info({table_name})")
         return any(row[1] == column_name for row in cur.fetchall())
     except Exception:
@@ -475,9 +478,15 @@ def get_users_list(request):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            # Paginación
-            page = int(request.GET.get('page', 1))
-            page_size = min(int(request.GET.get('page_size', 20)), 100)
+            # Paginación (con límites seguros para evitar OFFSET negativo / división por cero)
+            try:
+                page = max(1, int(request.GET.get('page', 1)))
+            except (TypeError, ValueError):
+                page = 1
+            try:
+                page_size = min(max(1, int(request.GET.get('page_size', 20))), 100)
+            except (TypeError, ValueError):
+                page_size = 20
             offset = (page - 1) * page_size
 
             has_historial_rol = _table_exists(cursor, "historial_rol_usuario") and _table_exists(cursor, "rol")
@@ -543,6 +552,36 @@ def get_users_list(request):
             role_filter = request.GET.get('role', '').strip()
             search_filter = request.GET.get('search', '').strip()
             status_filter = request.GET.get('status', '').strip()
+            region_filter = request.GET.get('region_id', '').strip()
+            comuna_filter = request.GET.get('comuna_id', '').strip()
+
+            # Validar formato UUID antes de usarlos en la consulta (evita errores 500
+            # de Postgres por "invalid input syntax for type uuid").
+            if region_filter:
+                try:
+                    uuid.UUID(region_filter)
+                except (ValueError, AttributeError, TypeError):
+                    return Response(
+                        {'error': 'region_id inválido: debe ser un UUID'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            if comuna_filter:
+                try:
+                    uuid.UUID(comuna_filter)
+                except (ValueError, AttributeError, TypeError):
+                    return Response(
+                        {'error': 'comuna_id inválido: debe ser un UUID'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+            has_comuna = _table_exists(cursor, "comuna")
+            has_region = _table_exists(cursor, "region")
+            has_id_comuna_column = _column_exists(cursor, "usuario", "id_comuna")
+            geo_join_sql = ""
+            if has_comuna and has_id_comuna_column:
+                geo_join_sql += " LEFT JOIN comuna geo_c ON geo_c.id_comuna = u.id_comuna"
+                if has_region:
+                    geo_join_sql += " LEFT JOIN region geo_r ON geo_r.id_region = geo_c.id_region"
 
             # Construcción de la consulta base
             where_clauses = []
@@ -579,6 +618,14 @@ def get_users_list(request):
             elif status_filter == 'inactivo':
                 where_clauses.append("COALESCE(au.is_active, TRUE) = FALSE")
 
+            if region_filter and has_comuna and has_id_comuna_column:
+                where_clauses.append("geo_c.id_region = %s")
+                params.append(region_filter)
+
+            if comuna_filter and has_id_comuna_column:
+                where_clauses.append("u.id_comuna = %s")
+                params.append(comuna_filter)
+
             where_sql = ' AND '.join(where_clauses) if where_clauses else '1=1'
 
             # Contar total de registros
@@ -588,6 +635,7 @@ def get_users_list(request):
                 FROM usuario u
                 {role_join_sql}
                 {auth_join_sql}
+                {geo_join_sql}
                 WHERE {where_sql}
             """
             cursor.execute(count_query, params)
@@ -624,6 +672,33 @@ def get_users_list(request):
             else:
                 servicios_activos_sql = "NULL as servicios_activos"
 
+            # Comuna/región del usuario (para mostrar y filtrar)
+            if has_comuna and has_id_comuna_column:
+                comuna_nombre_sql = "geo_c.nombre"
+                region_nombre_sql = "geo_r.nombre" if has_region else "NULL"
+                comuna_id_sql = "geo_c.id_comuna"
+                region_id_sql = "geo_r.id_region" if has_region else "NULL"
+            else:
+                comuna_nombre_sql = "NULL"
+                region_nombre_sql = "NULL"
+                comuna_id_sql = "NULL"
+                region_id_sql = "NULL"
+
+            # Calificación promedio como profesional (para detectar posibles motivos de deshabilitación)
+            has_resena = _table_exists(cursor, "resena")
+            has_solicitud = _table_exists(cursor, "solicitud_servicio")
+            if has_resena and has_solicitud:
+                calificacion_promedio_sql = """
+                    (SELECT ROUND(AVG(
+                        (COALESCE(r.calificacion_calidad,0) + COALESCE(r.calificacion_puntualidad,0) + COALESCE(r.calificacion_comunicacion,0)) / 3.0
+                     ), 1)
+                     FROM resena r
+                     JOIN solicitud_servicio sr ON sr.id_solicitud_servicio = r.id_solicitud_servicio
+                     WHERE sr.rut_profesional = u.rut) as calificacion_promedio
+                """
+            else:
+                calificacion_promedio_sql = "NULL as calificacion_promedio"
+
             # Obtener usuarios con paginación
             list_query = f"""
                 {role_cte_sql}
@@ -640,10 +715,16 @@ def get_users_list(request):
                     (SELECT COUNT(*) FROM solicitud_servicio WHERE rut_cliente = u.rut) as solicitudes_como_cliente,
                     (SELECT COUNT(*) FROM solicitud_servicio WHERE rut_profesional = u.rut) as solicitudes_como_profesional,
                     {digito_select_sql} as digito_verificador,
-                    {servicios_activos_sql}
+                    {servicios_activos_sql},
+                    {comuna_nombre_sql} as comuna_nombre,
+                    {region_nombre_sql} as region_nombre,
+                    {comuna_id_sql} as comuna_id,
+                    {region_id_sql} as region_id,
+                    {calificacion_promedio_sql}
                 FROM usuario u
                 {role_join_sql}
                 {auth_join_sql}
+                {geo_join_sql}
                 WHERE {where_sql}
                 ORDER BY u.creado_en DESC
                 LIMIT %s OFFSET %s
@@ -658,6 +739,11 @@ def get_users_list(request):
                 servicios_activos = (
                     [s.strip() for s in servicios_activos_raw.split(',')] if servicios_activos_raw else []
                 )
+                comuna_nombre = row[13]
+                region_nombre = row[14]
+                comuna_id = row[15]
+                region_id = row[16]
+                calificacion_promedio = row[17]
                 users.append({
                     'rut': row[0],
                     'digito_verificador': digito_verificador,
@@ -673,7 +759,12 @@ def get_users_list(request):
                     'ultima_actividad': row[8].isoformat() if row[8] else None,
                     'solicitudes_como_cliente': row[9] or 0,
                     'solicitudes_como_profesional': row[10] or 0,
-                    'servicios_activos': servicios_activos
+                    'servicios_activos': servicios_activos,
+                    'comuna_nombre': comuna_nombre,
+                    'region_nombre': region_nombre,
+                    'comuna_id': str(comuna_id) if comuna_id else None,
+                    'region_id': str(region_id) if region_id else None,
+                    'calificacion_promedio': float(calificacion_promedio) if calificacion_promedio is not None else None,
                 })
 
             # Calcular paginación
@@ -719,8 +810,19 @@ def toggle_user_status(request, rut):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
+            if not str(rut).strip().lstrip('-').isdigit():
+                return Response(
+                    {'error': 'RUT inválido: debe ser numérico'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             admin_email = request.user.email
             nuevo_estado = request.data.get('activo', False)
+            if isinstance(nuevo_estado, str):
+                # Evita que strings como "false"/"0" se evalúen como verdaderos
+                nuevo_estado = nuevo_estado.strip().lower() in ('1', 'true', 'yes', 'si', 'sí')
+            else:
+                nuevo_estado = bool(nuevo_estado)
             razon = request.data.get('razon', 'Sin razón especificada')
 
             # No permitir desactivar al propio usuario administrador
@@ -790,5 +892,245 @@ def toggle_user_status(request, rut):
         logger.error(f"Error cambiando estado del usuario: {str(e)}")
         return Response(
             {'error': f'Error al cambiar estado del usuario: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+def _estado_solicitud(cancelado_en, completado_en, confirmado_en) -> str:
+    if cancelado_en is not None:
+        return 'cancelado'
+    if completado_en is not None:
+        return 'completado'
+    if confirmado_en is not None:
+        return 'confirmado'
+    return 'pendiente'
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def get_user_service_history(request, rut):
+    """
+    Gestor de servicios por usuario (panel de administración).
+
+    Retorna, para un usuario dado (identificado por RUT):
+    - Información general.
+    - Si ofrece servicios (profesional): el detalle de cada servicio que ofrece
+      (categoría, descripción, precio, trabajos completados/cancelados, calificación
+      promedio) y el historial transaccional completo como profesional (cliente,
+      categoría, fecha, precio, estado y reseña/calificación cuando corresponde).
+    - El historial transaccional completo como cliente (profesional, categoría,
+      fecha, precio, estado y reseña/calificación que dejó, cuando corresponde),
+      independiente de si el usuario también ofrece servicios.
+    """
+    try:
+        with connection.cursor() as cursor:
+            role = get_user_role_by_email(cursor, request.user.email)
+            if role != 'administrador':
+                return Response(
+                    {'error': 'No tiene permisos de administrador'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            if not str(rut).strip().lstrip('-').isdigit():
+                return Response(
+                    {'error': 'RUT inválido: debe ser numérico'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            has_digito_verificador = _column_exists(cursor, "usuario", "digito_verificador")
+            digito_select_sql = "u.digito_verificador" if has_digito_verificador else "NULL"
+
+            cursor.execute(f"""
+                SELECT u.rut, {digito_select_sql}, u.nombres, u.apellidos, u.email, u.telefono,
+                       u.creado_en, u.ultima_actividad,
+                       COALESCE(au.is_active, TRUE) as activo
+                FROM usuario u
+                LEFT JOIN auth_user au ON au.email = u.email
+                WHERE u.rut = %s
+            """, [rut])
+            row = cursor.fetchone()
+            if not row:
+                return Response({'error': 'Usuario no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+            (u_rut, digito, nombres, apellidos, email, telefono, creado_en, ultima_actividad, activo) = row
+
+            has_hev = _table_exists(cursor, "historial_estado_verificacion_servicio") and \
+                _table_exists(cursor, "estado_verificacion_servicio")
+            has_trabajos_cols = _column_exists(cursor, "servicio_profesional", "trabajos_completados")
+
+            if has_hev:
+                estado_actual_sql = """
+                    COALESCE(
+                        (SELECT evs.nombre
+                         FROM historial_estado_verificacion_servicio h
+                         JOIN estado_verificacion_servicio evs
+                            ON evs.id_estado_verificacion_servicio = h.id_estado_verificacion_servicio
+                         WHERE h.id_servicio_profesional = sp.id_servicio_profesional
+                         ORDER BY h.cambiado_en DESC LIMIT 1),
+                        'pendiente'
+                    )
+                """
+            else:
+                estado_actual_sql = "'aprobado'"
+
+            trabajos_sql = "sp.trabajos_completados, sp.trabajos_cancelados" if has_trabajos_cols else "NULL, NULL"
+
+            # Servicios que ofrece el usuario (si es profesional)
+            cursor.execute(f"""
+                SELECT sp.id_servicio_profesional, cs.nombre, sp.descripcion, sp.anos_experiencia,
+                       sp.precio_fijo, {trabajos_sql},
+                       {estado_actual_sql} as estado_verificacion,
+                       (SELECT ROUND(AVG(
+                            (COALESCE(r.calificacion_calidad,0) + COALESCE(r.calificacion_puntualidad,0) + COALESCE(r.calificacion_comunicacion,0)) / 3.0
+                        ), 1)
+                        FROM resena r
+                        JOIN solicitud_servicio s2 ON s2.id_solicitud_servicio = r.id_solicitud_servicio
+                        WHERE s2.id_servicio_profesional = sp.id_servicio_profesional) as calificacion_promedio,
+                       (SELECT COUNT(*) FROM resena r
+                        JOIN solicitud_servicio s2 ON s2.id_solicitud_servicio = r.id_solicitud_servicio
+                        WHERE s2.id_servicio_profesional = sp.id_servicio_profesional) as total_resenas
+                FROM servicio_profesional sp
+                JOIN categoria_servicio cs ON cs.id_categoria_servicio = sp.id_categoria_servicio
+                WHERE sp.rut_usuario = %s
+                ORDER BY cs.nombre
+            """, [rut])
+
+            services = []
+            for r in cursor.fetchall():
+                services.append({
+                    'id': str(r[0]),
+                    'categoria': r[1],
+                    'descripcion': r[2],
+                    'anos_experiencia': r[3],
+                    'precio_fijo': int(r[4]) if r[4] is not None else 0,
+                    'trabajos_completados': r[5] or 0,
+                    'trabajos_cancelados': r[6] or 0,
+                    'estado_verificacion': r[7],
+                    'calificacion_promedio': float(r[8]) if r[8] is not None else None,
+                    'total_resenas': r[9] or 0,
+                })
+
+            is_professional = len(services) > 0
+
+            # Calificación y estadísticas globales como profesional
+            overall_rating = None
+            total_reviews = 0
+            if is_professional:
+                cursor.execute("""
+                    SELECT
+                        ROUND(AVG(
+                            (COALESCE(r.calificacion_calidad,0) + COALESCE(r.calificacion_puntualidad,0) + COALESCE(r.calificacion_comunicacion,0)) / 3.0
+                        ), 1),
+                        COUNT(*)
+                    FROM resena r
+                    JOIN solicitud_servicio s ON s.id_solicitud_servicio = r.id_solicitud_servicio
+                    WHERE s.rut_profesional = %s
+                """, [rut])
+                avg_row = cursor.fetchone()
+                if avg_row:
+                    overall_rating = float(avg_row[0]) if avg_row[0] is not None else None
+                    total_reviews = avg_row[1] or 0
+
+            # Historial transaccional como profesional
+            professional_history = []
+            if is_professional:
+                cursor.execute("""
+                    SELECT s.id_solicitud_servicio, s.titulo, s.fecha_programada, s.precio_total,
+                           s.cancelado_en, s.completado_en, s.confirmado_en,
+                           uc.nombres || ' ' || uc.apellidos AS cliente_nombre,
+                           cat.nombre AS categoria,
+                           re.comentario,
+                           CASE WHEN re.id_resena IS NULL THEN NULL
+                                ELSE ROUND((COALESCE(re.calificacion_calidad,0) + COALESCE(re.calificacion_puntualidad,0) + COALESCE(re.calificacion_comunicacion,0)) / 3.0, 1)
+                           END AS calificacion,
+                           re.calificacion_calidad, re.calificacion_puntualidad, re.calificacion_comunicacion
+                    FROM solicitud_servicio s
+                    JOIN usuario uc ON uc.rut = s.rut_cliente
+                    LEFT JOIN servicio_profesional sp ON sp.id_servicio_profesional = s.id_servicio_profesional
+                    LEFT JOIN categoria_servicio cat ON cat.id_categoria_servicio = sp.id_categoria_servicio
+                    LEFT JOIN resena re ON re.id_solicitud_servicio = s.id_solicitud_servicio
+                    WHERE s.rut_profesional = %s
+                    ORDER BY s.fecha_programada DESC
+                """, [rut])
+                for r in cursor.fetchall():
+                    (rid, titulo, fecha, precio, cancelado_en, completado_en, confirmado_en,
+                     cliente_nombre, categoria, comentario, calificacion, cal_calidad, cal_punt, cal_com) = r
+                    professional_history.append({
+                        'id': str(rid),
+                        'titulo': titulo,
+                        'fecha': fecha.isoformat() if hasattr(fecha, 'isoformat') else str(fecha),
+                        'precio': int(precio or 0),
+                        'estado': _estado_solicitud(cancelado_en, completado_en, confirmado_en),
+                        'contraparte': cliente_nombre or 'Cliente',
+                        'categoria': categoria,
+                        'resena_comentario': comentario,
+                        'resena_calificacion': float(calificacion) if calificacion is not None else None,
+                        'resena_calidad': int(cal_calidad) if cal_calidad is not None else None,
+                        'resena_puntualidad': int(cal_punt) if cal_punt is not None else None,
+                        'resena_comunicacion': int(cal_com) if cal_com is not None else None,
+                    })
+
+            # Historial transaccional como cliente
+            cursor.execute("""
+                SELECT s.id_solicitud_servicio, s.titulo, s.fecha_programada, s.precio_total,
+                       s.cancelado_en, s.completado_en, s.confirmado_en,
+                       up.nombres || ' ' || up.apellidos AS profesional_nombre,
+                       cat.nombre AS categoria,
+                       re.comentario,
+                       CASE WHEN re.id_resena IS NULL THEN NULL
+                            ELSE ROUND((COALESCE(re.calificacion_calidad,0) + COALESCE(re.calificacion_puntualidad,0) + COALESCE(re.calificacion_comunicacion,0)) / 3.0, 1)
+                       END AS calificacion,
+                       re.calificacion_calidad, re.calificacion_puntualidad, re.calificacion_comunicacion
+                FROM solicitud_servicio s
+                LEFT JOIN usuario up ON up.rut = s.rut_profesional
+                LEFT JOIN servicio_profesional sp ON sp.id_servicio_profesional = s.id_servicio_profesional
+                LEFT JOIN categoria_servicio cat ON cat.id_categoria_servicio = sp.id_categoria_servicio
+                LEFT JOIN resena re ON re.id_solicitud_servicio = s.id_solicitud_servicio
+                WHERE s.rut_cliente = %s
+                ORDER BY s.fecha_programada DESC
+            """, [rut])
+
+            client_history = []
+            for r in cursor.fetchall():
+                (rid, titulo, fecha, precio, cancelado_en, completado_en, confirmado_en,
+                 profesional_nombre, categoria, comentario, calificacion, cal_calidad, cal_punt, cal_com) = r
+                client_history.append({
+                    'id': str(rid),
+                    'titulo': titulo,
+                    'fecha': fecha.isoformat() if hasattr(fecha, 'isoformat') else str(fecha),
+                    'precio': int(precio or 0),
+                    'estado': _estado_solicitud(cancelado_en, completado_en, confirmado_en),
+                    'contraparte': profesional_nombre or 'Profesional',
+                    'categoria': categoria,
+                    'resena_comentario': comentario,
+                    'resena_calificacion': float(calificacion) if calificacion is not None else None,
+                    'resena_calidad': int(cal_calidad) if cal_calidad is not None else None,
+                    'resena_puntualidad': int(cal_punt) if cal_punt is not None else None,
+                    'resena_comunicacion': int(cal_com) if cal_com is not None else None,
+                })
+
+            return Response({
+                'user': {
+                    'rut': u_rut,
+                    'rut_formateado': _format_rut(u_rut, digito),
+                    'nombre_completo': f"{nombres} {apellidos}",
+                    'email': email,
+                    'telefono': telefono,
+                    'activo': activo,
+                    'fecha_registro': creado_en.isoformat() if creado_en else None,
+                    'ultima_actividad': ultima_actividad.isoformat() if ultima_actividad else None,
+                },
+                'is_professional': is_professional,
+                'overall_rating': overall_rating,
+                'total_reviews': total_reviews,
+                'services': services,
+                'professional_history': professional_history,
+                'client_history': client_history,
+            }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(f"Error obteniendo historial de servicios del usuario: {str(e)}")
+        return Response(
+            {'error': f'Error al obtener historial de servicios: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

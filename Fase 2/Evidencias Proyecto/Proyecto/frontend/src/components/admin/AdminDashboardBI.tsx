@@ -1,22 +1,13 @@
 import { useState, useEffect } from "react"
-import { toast } from "sonner"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs"
 import { Button } from "../ui/button"
 import { Alert, AlertDescription } from "../ui/alert"
 import { Badge } from "../ui/badge"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "../ui/alert-dialog"
-import { apiGetAuth, apiPutAuth } from "../../lib/api"
+import { apiGetAuth } from "../../lib/api"
+import UserServiceManager from "./UserServiceManager"
+import PlatformSettingsTab from "./PlatformSettingsTab"
 import { 
   Users, 
   CheckCircle, 
@@ -39,8 +30,6 @@ import {
   XCircle,
   Timer,
   CalendarDays,
-  Phone,
-  IdCard,
 } from "lucide-react"
 
 interface AdminDashboardBIProps {
@@ -96,43 +85,10 @@ interface DashboardData {
   topProfessionals?: Array<{ name: string; reviews: number; rating: number }>
 }
 
-interface User {
-  rut: string
-  digito_verificador?: string
-  rut_formateado?: string
-  nombres?: string
-  apellidos?: string
-  nombre_completo?: string
-  email?: string
-  rol?: string
-  activo: boolean
-  telefono?: string
-  fecha_registro?: string
-  ultima_actividad?: string
-  solicitudes_como_cliente?: number
-  solicitudes_como_profesional?: number
-  servicios_activos?: string[]
-}
-
-const getUserDisplayName = (user: User) => {
-  return user.nombre_completo || `${user.nombres || 'Usuario'} ${user.apellidos || ''}`.trim() || 'Usuario'
-}
-
-const getRoleLabel = (rol?: string) => {
-  if (rol === 'profesional') return 'Trabajador'
-  if (rol === 'cliente') return 'Cliente'
-  return rol ? rol.charAt(0).toUpperCase() + rol.slice(1) : 'N/A'
-}
-
 export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [users, setUsers] = useState<User[]>([])
-  const [loadingUsers, setLoadingUsers] = useState(false)
-  const [usersError, setUsersError] = useState<string | null>(null)
-  const [disablingUser, setDisablingUser] = useState<string | null>(null)
-  const [userPendingConfirm, setUserPendingConfirm] = useState<User | null>(null)
 
   // Cargar datos del dashboard
   useEffect(() => {
@@ -151,26 +107,6 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
     }
 
     fetchDashboardData()
-  }, [])
-
-  // Cargar usuarios para el Centro de Operaciones
-  useEffect(() => {
-    const fetchUsers = async () => {
-      try {
-        setLoadingUsers(true)
-        const data = await apiGetAuth('/api/admin/operations/users/')
-        setUsers(Array.isArray(data.users) ? data.users : [])
-        setUsersError(null)
-      } catch (err: any) {
-        console.error('Error cargando usuarios:', err)
-        setUsers([])
-        setUsersError(err.message || 'Error cargando usuarios')
-      } finally {
-        setLoadingUsers(false)
-      }
-    }
-
-    fetchUsers()
   }, [])
 
   // Datos para usar en el componente
@@ -204,60 +140,6 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
     (stats.pendingServices || 0) + (stats.confirmedServices || 0) + (stats.inProgressServices || 0)
 
   const trendMax = trend.length > 0 ? Math.max(...trend.map(t => t.count)) : 1
-
-  // Manejar deshabilitar/habilitar usuario
-  const handleToggleUserDisable = async (user: User) => {
-    try {
-      setDisablingUser(user.rut)
-      const nuevoEstado = !user.activo
-
-      // Optimistic update
-      setUsers((prev) =>
-        prev.map((u) => (u.rut === user.rut ? { ...u, activo: nuevoEstado } : u))
-      )
-
-      // Enviar al backend
-      const result = await apiPutAuth(`/api/admin/operations/users/${user.rut}/toggle-status/`, { 
-        activo: nuevoEstado 
-      })
-
-      if (nuevoEstado) {
-        toast.success('Usuario habilitado')
-      } else {
-        const cancelledCount = result?.cancelled_requests ?? 0
-        toast.success(
-          cancelledCount > 0
-            ? `Usuario deshabilitado. Se cancelaron ${cancelledCount} solicitud(es) pendiente(s)/confirmada(s) y se notificó a los usuarios involucrados.`
-            : 'Usuario deshabilitado'
-        )
-      }
-    } catch (err: any) {
-      console.error('Error actualizando usuario:', err)
-      toast.error('Error actualizando usuario: ' + err.message)
-      // Revert optimistic update
-      setUsers((prev) =>
-        prev.map((u) => (u.rut === user.rut ? { ...u, activo: user.activo } : u))
-      )
-    } finally {
-      setDisablingUser(null)
-    }
-  }
-
-  // Solicita confirmación antes de deshabilitar; habilitar no requiere confirmación
-  const handleRequestToggleUserDisable = (user: User) => {
-    if (user.activo) {
-      setUserPendingConfirm(user)
-    } else {
-      handleToggleUserDisable(user)
-    }
-  }
-
-  const confirmDisableUser = () => {
-    if (userPendingConfirm) {
-      handleToggleUserDisable(userPendingConfirm)
-      setUserPendingConfirm(null)
-    }
-  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -304,8 +186,9 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
         {/* Dashboard Content */}
         {!loading && !error && (
           <Tabs defaultValue="overview" className="space-y-6">
-            <TabsList className="grid w-full grid-cols-2">
+            <TabsList className="grid w-full grid-cols-3">
               <TabsTrigger value="overview">Resumen de Estadísticas</TabsTrigger>
+              <TabsTrigger value="service-manager">Gestor de Servicios</TabsTrigger>
               <TabsTrigger value="operations">Centro de Operaciones</TabsTrigger>
             </TabsList>
 
@@ -701,127 +584,18 @@ export default function AdminDashboardBI({ onLogout }: AdminDashboardBIProps) {
 
             </TabsContent>
 
-            {/* TAB: OPERACIONES - Vista de Usuarios */}
-            <TabsContent value="operations" className="space-y-6">
-              <div>
-                <h2 className="text-2xl font-bold">Centro de Operaciones</h2>
-                <p className="text-gray-600">Gestión de cuentas de usuario</p>
-              </div>
+            {/* TAB: GESTOR DE SERVICIOS POR USUARIO */}
+            <TabsContent value="service-manager">
+              <UserServiceManager />
+            </TabsContent>
 
-              {loadingUsers ? (
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="flex items-center justify-center py-8">
-                      <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
-                      <span className="ml-3 text-gray-600">Cargando usuarios...</span>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : usersError ? (
-                <Alert className="border-red-200 bg-red-50">
-                  <AlertCircle className="h-4 w-4 text-red-600" />
-                  <AlertDescription className="text-red-800">{usersError}</AlertDescription>
-                </Alert>
-              ) : users.length === 0 ? (
-                <Card>
-                  <CardContent className="pt-6">
-                    <p className="text-sm text-gray-600">No se encontraron usuarios.</p>
-                  </CardContent>
-                </Card>
-              ) : (
-                <div className="space-y-4">
-                  {users.map((u) => (
-                    <Card key={u.rut}>
-                      <CardContent className="flex items-center justify-between pt-6">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <div className="font-medium">{getUserDisplayName(u)}</div>
-                            <Badge variant={u.rol === 'profesional' ? 'default' : 'secondary'}>
-                              {getRoleLabel(u.rol)}
-                            </Badge>
-                          </div>
-                          <div className="text-sm text-gray-500">{u.email}</div>
-                          <div className="flex items-center gap-4 flex-wrap text-xs text-gray-400 mt-1">
-                            <span className="flex items-center gap-1">
-                              <IdCard className="w-3 h-3" />
-                              {u.rut_formateado || u.rut}
-                            </span>
-                            {u.telefono && (
-                              <span className="flex items-center gap-1">
-                                <Phone className="w-3 h-3" />
-                                {u.telefono}
-                              </span>
-                            )}
-                          </div>
-                          {u.rol === 'profesional' && (
-                            <div className="flex items-start gap-1 mt-2">
-                              <Wrench className="w-3 h-3 text-gray-400 mt-1 shrink-0" />
-                              {u.servicios_activos && u.servicios_activos.length > 0 ? (
-                                <div className="flex flex-wrap gap-1">
-                                  {u.servicios_activos.map((servicio) => (
-                                    <Badge key={servicio} variant="outline" className="text-xs">
-                                      {servicio}
-                                    </Badge>
-                                  ))}
-                                </div>
-                              ) : (
-                                <span className="text-xs text-gray-400">Sin servicios activos</span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <div className="text-sm text-gray-600 px-3 py-1 bg-gray-100 rounded">
-                            {u.activo ? 'Activo' : 'Deshabilitado'}
-                          </div>
-                          <Button
-                            variant={u.activo ? 'destructive' : 'secondary'}
-                            size="sm"
-                            disabled={disablingUser === u.rut}
-                            onClick={() => handleRequestToggleUserDisable(u)}
-                          >
-                            {disablingUser === u.rut ? (
-                              <>
-                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                Procesando...
-                              </>
-                            ) : u.activo ? 'Deshabilitar' : 'Habilitar'}
-                          </Button>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-                </div>
-              )}
+            {/* TAB: CENTRO DE OPERACIONES - Configuración de la plataforma */}
+            <TabsContent value="operations">
+              <PlatformSettingsTab />
             </TabsContent>
           </Tabs>
         )}
       </div>
-
-      {/* Confirmación antes de deshabilitar una cuenta */}
-      <AlertDialog open={!!userPendingConfirm} onOpenChange={(open) => !open && setUserPendingConfirm(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>¿Deshabilitar esta cuenta?</AlertDialogTitle>
-            <AlertDialogDescription>
-              {userPendingConfirm && (
-                <>
-                  Estás a punto de deshabilitar la cuenta de <strong>{getUserDisplayName(userPendingConfirm)}</strong>.
-                  {' '}Si tiene solicitudes de servicio pendientes o confirmadas (como cliente o profesional),
-                  se cancelarán automáticamente y se notificará a los usuarios involucrados indicando el motivo.
-                  Esta acción no se puede deshacer fácilmente.
-                </>
-              )}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => setUserPendingConfirm(null)}>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmDisableUser} className="bg-red-600 hover:bg-red-700 text-white">
-              Sí, deshabilitar
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }

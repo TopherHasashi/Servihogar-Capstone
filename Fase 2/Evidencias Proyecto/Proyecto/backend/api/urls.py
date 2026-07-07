@@ -45,6 +45,13 @@ from .config_views import (
     get_system_config, 
     update_system_config, 
     get_config_value,
+    admin_list_regions,
+    admin_enable_region,
+    admin_list_comunas,
+    admin_toggle_comuna,
+    admin_list_categories,
+    admin_create_category,
+    admin_update_category,
 )
 from .operations_views import (
     get_problematic_requests,
@@ -52,6 +59,7 @@ from .operations_views import (
     resolve_request_issue,
     get_users_list,
     toggle_user_status,
+    get_user_service_history,
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 from .serializers import EmailTokenObtainPairSerializer
@@ -107,6 +115,16 @@ urlpatterns = [
     # System Configuration
     path("admin/config/", get_system_config, name="get_system_config"),
     path("admin/config/update/", update_system_config, name="update_system_config"),
+    # Cobertura geográfica (regiones/comunas habilitadas)
+    path("admin/config/regions/", admin_list_regions, name="admin_list_regions"),
+    path("admin/config/regions/<uuid:region_id>/enable/", admin_enable_region, name="admin_enable_region"),
+    path("admin/config/regions/<uuid:region_id>/comunas/", admin_list_comunas, name="admin_list_comunas"),
+    path("admin/config/comunas/<uuid:comuna_id>/toggle/", admin_toggle_comuna, name="admin_toggle_comuna"),
+    # Categorías de servicio (crear y renombrar)
+    path("admin/config/categories/", admin_list_categories, name="admin_list_categories"),
+    path("admin/config/categories/create/", admin_create_category, name="admin_create_category"),
+    path("admin/config/categories/<uuid:category_id>/", admin_update_category, name="admin_update_category"),
+    # Clave genérica al final para no interceptar las rutas específicas anteriores
     path("admin/config/<str:clave>/", get_config_value, name="get_config_value"),
     # Operations Center
     path("admin/operations/problematic-requests/", get_problematic_requests, name="get_problematic_requests"),
@@ -114,6 +132,7 @@ urlpatterns = [
     path("admin/operations/resolve/<uuid:request_id>/", resolve_request_issue, name="resolve_request_issue"),
     path("admin/operations/users/", get_users_list, name="get_users_list"),
     path("admin/operations/users/<str:rut>/toggle-status/", toggle_user_status, name="toggle_user_status"),
+    path("admin/operations/users/<str:rut>/service-history/", get_user_service_history, name="get_user_service_history"),
     # Notifications
     path("notifications/", notifications_list, name="notifications_list"),
     path("notifications/<int:notification_id>/read/", notification_mark_read, name="notification_mark_read"),

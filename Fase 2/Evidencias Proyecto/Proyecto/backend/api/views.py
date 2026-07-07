@@ -414,7 +414,7 @@ def ping(request):
 @api_view(["GET"])
 def regiones(request):
 	with connection.cursor() as cur:
-		cur.execute("SELECT id_region, nombre, codigo FROM region ORDER BY nombre")
+		cur.execute("SELECT id_region, nombre, codigo FROM region WHERE COALESCE(disponible, TRUE) = TRUE ORDER BY nombre")
 		rows = cur.fetchall()
 	result = []
 	for r in rows:
@@ -445,6 +445,8 @@ def comunas(request):
 		except Exception:
 			biobio_ids = set()
 		if comuna_id:
+			# Búsqueda directa por ID: no filtramos por disponibilidad para no
+			# romper la visualización de direcciones ya asignadas a usuarios.
 			cur.execute(
 				"SELECT id_comuna, nombre, codigo, id_region FROM comuna WHERE id_comuna=%s",
 				[comuna_id],
@@ -460,11 +462,17 @@ def comunas(request):
 			return Response(result)
 		elif region_id:
 			cur.execute(
-				"SELECT id_comuna, nombre, codigo, id_region FROM comuna WHERE id_region=%s ORDER BY nombre",
+				"""
+				SELECT id_comuna, nombre, codigo, id_region FROM comuna
+				WHERE id_region=%s AND COALESCE(disponible, TRUE) = TRUE
+				ORDER BY nombre
+				""",
 				[region_id],
 			)
 		else:
-			cur.execute("SELECT id_comuna, nombre, codigo, id_region FROM comuna ORDER BY nombre")
+			cur.execute(
+				"SELECT id_comuna, nombre, codigo, id_region FROM comuna WHERE COALESCE(disponible, TRUE) = TRUE ORDER BY nombre"
+			)
 		rows = cur.fetchall()
 	result = []
 	for r in rows:
